@@ -80,6 +80,24 @@ class Report:
     counting it would flag every schedule ever produced.
     """
     min_signal_index: int = 0
+    headroom: float | None = None
+    """largest `Global x Start` the guard will let through at the zone's first sigma.
+
+    Closed form, and the number a user actually wants: the ceiling at index `i` is
+    `min(1 - MIN_SIGNAL_FRACTION * (1 - sigma_i), sigma_{i-1} * (1 - MIN_STEP_RATIO))`, so
+    the largest factor that does not trip the guard is that over `sigma_i`.  Predicted
+    1.0618 for one live schedule where the tester independently found 1.06 clean and 1.07
+    guarded.
+    """
+    saturated: bool = False
+    """the zone's *first* sigma is capped, so raising the factor no longer moves it.
+
+    The rest of the zone still responds, but the head of it - where the leverage is - is
+    pinned, and raising the factor only stretches the tail.  Worth saying out loud, because
+    "turn it up more" is the natural response to a weak result and here it does the
+    opposite of what it looks like: on one tested schedule Start 1.15 through 1.30 all
+    produced the same first zone sigma, and a *weaker* overall effect than 1.13.
+    """
 
     @property
     def unsafe(self) -> bool:
@@ -105,6 +123,19 @@ def interpolate_curve(t: float, curve_type: str, strength: float) -> float:
 
 def _sigmoid(x: float) -> float:
     return 1.0 / (1.0 + math.exp(-x))
+
+
+def _ceiling(sigmas: torch.Tensor, index: int, previous: float | None, sigma_max: float, is_flow: bool) -> float:
+    """The highest value sigma at `index` may take and still leave a runnable schedule."""
+
+    ceiling = sigma_max
+    if is_flow:
+        #   strictly below the maximum: capping *at* it is what makes `1 - sigma` zero,
+        #   and the sampler divides by that
+        ceiling = min(ceiling, 1.0 - MIN_SIGNAL_FRACTION * (1.0 - float(sigmas[index])))
+    if previous is not None:
+        ceiling = min(ceiling, previous * (1.0 - MIN_STEP_RATIO))
+    return ceiling
 
 
 def zone_indices(total: int, zone_start: float, zone_end: float) -> tuple[int, int]:
@@ -161,20 +192,19 @@ def multiply_sigmas(
 
     report = Report(sigmas=result, zone=(start_idx, end_idx), is_flow=is_flow)
 
+    if guard and start_idx < total and float(sigmas[start_idx]) > 0.0:
+        report.headroom = _ceiling(sigmas, start_idx, float(sigmas[start_idx - 1]) if start_idx > 0 else None, ceiling_max, is_flow) / float(sigmas[start_idx])
+
     if guard:
         for i in range(total):
             if float(sigmas[i]) <= 0.0:
                 continue  # the terminal zero stays zero
-            ceiling = ceiling_max
-            if is_flow:
-                #   strictly below 1.0: capping *at* the maximum is what makes
-                #   `1 - sigma` zero, and the sampler divides by that
-                ceiling = min(ceiling, 1.0 - MIN_SIGNAL_FRACTION * (1.0 - float(sigmas[i])))
-            if i > 0:
-                ceiling = min(ceiling, float(result[i - 1]) * (1.0 - MIN_STEP_RATIO))
+            ceiling = _ceiling(sigmas, i, float(result[i - 1]) if i > 0 else None, ceiling_max, is_flow)
             if float(result[i]) > ceiling:
                 result[i] = ceiling
                 report.guarded.append(i)
+
+        report.saturated = start_idx in report.guarded
 
     for i in range(total - 1):
         if float(result[i + 1]) >= float(result[i]):

@@ -7,7 +7,7 @@ txt2img and img2img accordion list.
 | | What it is | Character |
 | --- | --- | --- |
 | 🍄 **Great Conditioning Modifier** | Thirteen ways to nudge the prompt conditioning before the model reads it | `semantic_drift` is a safe variability knob; the rest vary |
-| 🍄 **Great Multiply Sigmas** | Zone-limited, curve-interpolated scaling of the noise schedule | Sharp. Small numbers, large consequences |
+| 🍄 **Great Multiply Sigmas** | Zone-limited, curve-interpolated scaling of the noise schedule | Sharp. Deflation is where the good results are |
 
 ## Install
 
@@ -234,21 +234,34 @@ shape of the transition between them and nothing else.
 lives roughly between **0.85 and 1.10**, which is why the sliders stop at 0.70 / 1.30 and
 step in thousandths.
 
-Measured on Krea 2 Turbo, Euler a, Beta, 8 steps, CFG 1:
+All the numbers below are measured on **Krea 2 Turbo, Euler a, Beta, 8 steps, CFG 1**, and
+the schedule they refer to is the one that run actually logged:
+
+```text
+idx:      0       1       2       3       4       5       6       7       8
+sigma: 1.0000  0.9621  0.8900  0.7847  0.6409  0.4579  0.2518  0.0735  0.0000
+1-sig: 0.0000  0.0379  0.1100  0.2153  0.3591  0.5421  0.7482  0.9265  1.0000
+```
 
 | Setting | Result |
 | --- | --- |
-| Start `0.98`, End `0.85`, Zone `0.2 → 1.0` | usable, minor perceivable changes |
-| Start `1.06`, End `0.85`, Zone `0.3 → 1.0` | coherent, clearly changed — a good setting |
-| Start `1.06`, End `0.85`, Zone `0.2 → 1.0` | **black image** |
-| Start `1.15`, End `0.85`, Zone `0.3 → 1.0` | major composition shift, coherent but imperfect |
-| Start `1.25`, End `0.85`, Zone `0.4 → 1.0` | breaks mid-generation; blurry, unfinished |
+| Start `0.90`, End `0.85`, Zone `0.2 → 1.0` | **best result found** — visible composition change, clean image |
 | Global `0.95`, Zone `0.1 → 1.0` | major composition shift, coherent |
-| Global `1.05`, Zone `0.1 → 1.0` or `0.2 → 1.0` | **black image** |
+| Start `1.06`, End `0.85`, Zone `0.3 → 1.0` | coherent, clearly changed |
+| Start `0.98`, End `0.85`, Zone `0.2 → 1.0` | usable, minor changes |
+| Global `0.98`, Zone `0.3 → 1.0` | good image, subtle |
 | Global `1.05`, Zone `0.3 → 1.0` | coherent, barely different from disabled |
+| Start `1.06`, End `0.85`, Zone `0.2 → 1.0` | **black image** without the guard |
+| Global `1.05`, Zone `0.1 → 1.0` | **black image** without the guard |
+| Start `1.15`, End `0.85`, Zone `0.3 → 1.0` | breaks without the guard; imperfect with it |
+| Start `1.25`, End `0.85`, Zone `0.4 → 1.0` | breaks mid-generation without the guard; near-inert with it |
 
-Every one of those is explained by two properties of the scaled schedule, both of which
-the extension now computes and logs before sampling starts.
+Read the pattern before the mechanism: **everything below 1.0 works, and the interesting
+results are all there.** Inflation is where the failures are, it needs the zone pushed
+later to be safe at all, and by the time it is safe it barely does anything.
+
+Two properties of the scaled schedule explain every row, and the extension computes and
+logs both before sampling starts.
 
 #### The schedule must keep decreasing
 
@@ -256,10 +269,9 @@ A scaled sigma that lands at or above its predecessor makes the sampler step *ba
 In `sample_euler_ancestral_RF` that puts a negative number under the square root of
 `renoise_coeff` — a NaN, and a ruined image.
 
-That is the `1.15 / Zone 0.3` and `1.25 / Zone 0.4` rows. On this schedule σ[1] = 0.9501
-and σ[2] = 0.8434, so a start factor of 1.15 lifts σ[2] to 0.9699 — *above* σ[1]. The
-further into the run the reversal lands, the fewer steps remain to recover from it, which
-is why 1.25 at Zone 0.4 breaks visibly mid-generation rather than merely degrading.
+Start `1.15` at Zone `0.3` lifts σ[2] from 0.8900 to 1.0235, above σ[1] = 0.9621. The
+further into the run the reversal lands, the fewer steps remain to recover, which is why
+`1.25` at Zone `0.4` breaks visibly mid-generation rather than merely degrading.
 
 #### On flow-matching models, sigma is a mixing coefficient
 
@@ -273,66 +285,89 @@ x = sigma · noise + (1 − sigma) · data
 so it is only defined on **[0, 1]**, and `1 − sigma` is how much *signal* the latent holds.
 The sampler divides by it (`alpha_down`, and `AbstractPrediction.inverse_noise_scaling`).
 These schedules start at exactly `1.0`, so the margin is already near zero at the head of
-the run — the Beta 8-step schedule above has only `0.0499` of signal at index 1.
+the run — only **0.0379** at index 1 above.
 
-That is the black rows. Start `1.06` on σ[1] = 0.9501 gives 1.0071: signal **−0.0071**,
-negative. Global `1.05` on σ[0] = 1.0 gives 1.05: signal **−0.05**.
+Start `1.06` on σ[1] gives 1.0198: signal **−0.0198**, negative. Global `1.05` on
+σ[0] = 1.0 gives 1.05: signal **−0.05**. Those are the black frames.
 
 Deflation cannot do this. Below 1.0 sigma falls, signal rises, and nothing can break — the
 asymmetry is structural, not a matter of taste.
 
+#### How much inflation a zone will take
+
+The guard's ceiling has a closed form, so the largest `Global × Start` that passes cleanly
+at a given zone is exactly:
+
+```text
+headroom = min( 1 − 0.5·(1 − σ) , σ_previous·0.999 ) / σ
+```
+
+which for the schedule above gives:
+
+| Zone start | index | sigma | max `Global × Start` |
+| --- | --- | --- | --- |
+| 0.1 | 0 | 1.0000 | **1.000** — no inflation at all |
+| 0.2 | 1 | 0.9621 | 1.020 |
+| 0.3 | 2 | 0.8900 | **1.062** |
+| 0.4 | 3 | 0.7847 | 1.133 |
+| 0.5 | 4 | 0.6409 | 1.223 |
+| 0.7 | 5 | 0.4579 | 1.398 |
+
+That 1.062 is not a model — it was predicted from the formula and then confirmed against a
+live run in which Start `1.06` passed clean and Start `1.07` tripped the guard. The log
+prints this number every run.
+
+**Past the headroom, turning the slider up does less, not more.** Once the zone's *first*
+sigma is capped, raising the factor no longer moves it and only stretches the tail of the
+zone — Start `1.15` through `1.30` at Zone `0.4` all pin σ[3] to the same value, and give a
+weaker overall effect than `1.13`. The log says `the zone's FIRST sigma is capped` when
+this happens. The fix is to move the zone later, never to push the factor higher.
+
 #### The zone slider resolves to a step index, and at 8 steps that is coarse
 
-`Zone start` is a *fraction*, converted with `int(zone × (steps))`. At 8 steps:
-
-| Zone start | index | sigma |
-| --- | --- | --- |
-| 0.0 **and 0.1** | 0 | 1.0000 |
-| 0.2 | 1 | 0.9501 |
-| 0.3 | 2 | 0.8434 |
-| 0.4 | 3 | 0.7011 |
-
-**Zone start 0.1 does not protect the first sigma at 8 steps — it is the same as 0.0.**
-That is why Global `1.05` at Zone `0.1` scaled σ[0] itself. The log prints the resolved
-indices on every run; read them rather than assuming.
+`Zone start` is a *fraction*, converted with `int(zone × steps)`. At 8 steps, `0.0` and
+`0.1` both resolve to **index 0** — so Zone `0.1` does not protect the first sigma at all,
+which is why Global `1.05` there scaled σ[0] itself. The log prints the resolved indices on
+every run; read them rather than assuming.
 
 ### Safety guard
 
 On by default. It walks the whole schedule and pulls any sigma down until both invariants
 hold: strictly below its predecessor, and — on flow models — retaining at least half its
-original signal margin. It logs every index it touched, which is your signal that the
-settings asked for something the sampler cannot run.
+original signal margin. It logs every index it touched.
 
-Replayed against the nine settings in the table above, the guard fires on **exactly the
-five that failed** and leaves the four that worked untouched.
+Replayed against the settings above it fires on exactly the ones that failed and leaves the
+ones that worked untouched. Live, it turned both black frames into coherent images.
+
+But **a guarded setting is a rescued setting, not a good one.** Start `1.25` at Zone `0.4`
+guards into a clean image with "very minimal changes" — the guard flattens the request
+rather than honouring it. Treat a guard warning as "this setting is past its limit", not as
+permission to leave it there.
 
 It caps strictly *below* the maximum, which matters more than it sounds: an earlier build
 capped scaled sigmas *at* `sigma_max`, and on a flow model that makes `1 − sigma` exactly
 zero — converting a wrong schedule into a guaranteed division by zero. Capping at the
 ceiling is as fatal as crossing it.
 
-Turn it off to reproduce the raw behaviour, or on epsilon models (SD 1.5, SDXL) where
-neither invariant is as sharp.
-
 ### What the log tells you
 
 Every run prints the schedule before and after, the resolved zone indices, the model
-family, and — on flow models — the signal margin per sigma. A black frame, a mid-run
-composition break and "looks the same as disabled" have completely different causes that
-are all visible there and nowhere else.
+family, the per-sigma signal margin, and the headroom. A black frame, a mid-run composition
+break and "looks the same as disabled" have completely different causes, all visible there
+and nowhere else.
 
 ### Two things that are *not* the explanation
 
 * **Compounding is not what breaks these.** `1.05 → 0.85` and `1.10 → 0.85` accumulate
   almost identical total corrections. What separates them is whether an individual sigma
-  crosses a boundary. Per-step drift still matters for *how strong* an effect is —
+  crosses a boundary. Per-step drift still governs *how strong* an effect is —
   `(end/start) ^ (1 / zone_steps)`, so the same pair is weaker at higher step counts — but
   it is not what produces a black image.
 * **Global factor is not a weak knob here.** It cancels out of a plain Euler update on an
   epsilon model, and an earlier version of this file said so. That is false for
   flow-matching models under ancestral sampling: `alpha = 1 − sigma` is not homogeneous in
   sigma, so a constant factor does not cancel. Global `0.95` produces a major composition
-  shift, and gives results close to Start `0.95` / End `1.0`.
+  shift, close to what Start `0.95` / End `1.0` gives.
 
 ---
 

@@ -271,6 +271,56 @@ for start in (0.7, 0.9, 1.0, 1.1, 1.2, 1.3):
                         broken.append(f"{name} g={glob} s={start} e={end} z={zone}")
 check(not broken, f"the guard let {len(broken)} setting(s) through: {broken[:3]}")
 
+#   ---- headroom and saturation, against the schedule a live run actually logged -------
+
+#   this is the real thing, read off the log of a Krea 2 Turbo / Euler a / Beta / 8-step
+#   run - not a reconstruction. The signal margin at index 1 is 0.0379.
+live = torch.tensor([1.0000, 0.9621, 0.8900, 0.7847, 0.6409, 0.4579, 0.2518, 0.0735, 0.0000])
+
+#   the tester independently found Start 1.06 clean and Start 1.07 guarded at zone 0.3
+head = guarded(live, start_factor=1.0, zone_start=0.3, zone_end=1.0).headroom
+check(head is not None, "no headroom was reported")
+check(abs(head - 1.0618) < 1e-3, f"headroom at zone 0.3 was {head:.4f}, expected 1.0618")
+check(not guarded(live, start_factor=1.06, end_factor=0.85, zone_start=0.3, zone_end=1.0).guarded, "Start 1.06 at zone 0.3 tripped the guard")
+check(guarded(live, start_factor=1.07, end_factor=0.85, zone_start=0.3, zone_end=1.0).guarded, "Start 1.07 at zone 0.3 did not trip the guard")
+
+#   headroom must rise as the zone moves later, and be exactly the threshold everywhere
+for zone in (0.2, 0.3, 0.4, 0.5, 0.7):
+    report = guarded(live, zone_start=zone, zone_end=1.0)
+    limit = report.headroom
+    check(limit is not None, f"zone {zone}: no headroom")
+    below = guarded(live, start_factor=limit - 0.002, end_factor=0.85, zone_start=zone, zone_end=1.0)
+    above = guarded(live, start_factor=limit + 0.002, end_factor=0.85, zone_start=zone, zone_end=1.0)
+    check(report.zone[0] not in below.guarded, f"zone {zone}: just under the headroom still tripped the guard")
+    check(report.zone[0] in above.guarded, f"zone {zone}: just over the headroom did not trip the guard")
+
+#   saturation: once the first zone sigma is capped, every higher factor is bit-identical
+saturated = [guarded(live, start_factor=f, end_factor=0.85, zone_start=0.4, zone_end=1.0) for f in (1.15, 1.20, 1.25, 1.30)]
+for report in saturated:
+    check(report.saturated, f"a capped first sigma was not reported as saturated ({report.guarded})")
+#   only the zone's FIRST sigma is pinned - the ramp still moves everything after it, so
+#   the schedules are not identical, just identical where the leverage is
+for report in saturated[1:]:
+    check(float(report.sigmas[3]) == float(saturated[0].sigmas[3]), "the saturated first sigma differed between settings")
+check(not torch.equal(saturated[-1].sigmas, saturated[0].sigmas), "the whole schedule saturated, not just its first sigma")
+check(not guarded(live, start_factor=1.10, end_factor=0.85, zone_start=0.4, zone_end=1.0).saturated, "an unguarded first sigma was reported as saturated")
+
+#   headroom is only meaningful with the guard on
+check(scaled(live, zone_start=0.3).headroom is None, "headroom was reported with the guard off")
+check(scaled(live, zone_start=0.3).saturated is False, "saturation was reported with the guard off")
+
+#   every setting the live testing reported as working must stay unguarded
+for name, kw in (
+    ("D  start 0.90 end 0.85 zone 0.2", dict(start_factor=0.90, end_factor=0.85, zone_start=0.2)),
+    ("E  global 0.98 zone 0.3", dict(factor_global=0.98, zone_start=0.3)),
+    ("t2 start 0.98 end 0.85 zone 0.2", dict(start_factor=0.98, end_factor=0.85, zone_start=0.2)),
+    ("B  start 1.06 end 0.85 zone 0.3", dict(start_factor=1.06, end_factor=0.85, zone_start=0.3)),
+):
+    report = guarded(live, zone_end=1.0, **kw)
+    check(not report.guarded, f"{name} was reported as working live but the guard touches it")
+    invariants(report, name)
+
+
 graph = sigma_core.comparison_graph(schedule, schedule * 0.8, 2, 6)
 check(graph is not None and graph.size[0] > 100, "comparison_graph did not render")
 

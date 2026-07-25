@@ -201,8 +201,15 @@ class GreatMultiplySigmas(scripts.Script):
             logger.info(f"[GMS]   signal: " + " ".join(f"{1.0 - v:.4f}" for v in report.sigmas.tolist()))
             logger.info(f"[GMS]   smallest signal margin {report.min_signal:.4f} at index {report.min_signal_index}")
 
+        #   the actionable number: what the zone's first sigma will actually tolerate
+        if report.headroom is not None:
+            logger.info(f"[GMS]   headroom: Global x Start up to {report.headroom:.4f} passes unguarded at zone index {start_idx}; move the zone later for more")
+
         if report.guarded:
             logger.warning(f"[GMS] {label}: the safety guard pulled down {len(report.guarded)} sigma(s) at indices {report.guarded} - the settings asked for a schedule the sampler cannot run")
+
+        if report.saturated:
+            logger.warning(f"[GMS] {label}: the zone's FIRST sigma is capped - raising Global or Start further no longer moves it, and only stretches the tail of the zone. Move the zone later instead")
 
         if report.backward:
             logger.error(f"[GMS] {label}: the schedule steps BACKWARDS at indices {report.backward} - expect a broken or black image. Lower the start factor, or move the zone later")
