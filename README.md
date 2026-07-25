@@ -1,145 +1,264 @@
-<b>NDDG Great Nodes</b>
+# NDDG Great Nodes — for WebUI Forge
 
-________________________________________
-________________________________________
+Five tools for [WebUI Forge (Neo)](https://github.com/Haoming02/sd-webui-forge-classic):
+two generation-time scripts that sit in the txt2img/img2img accordion list, and three
+image generators on their own **NDDG** tab.
 
-<b>🍄Great Conditioning Modifier</b>
+| | What it is | Where it lives |
+| --- | --- | --- |
+| 🍄 **Great Conditioning Modifier** | Fourteen ways to nudge the prompt conditioning before the model reads it | txt2img / img2img accordion |
+| 🍄 **Great Multiply Sigmas** | Zone-limited, curve-interpolated scaling of the noise schedule | txt2img / img2img accordion |
+| 🍄 **Interactive Organic Gradient** | Colour-stop gradient painter with a click-and-drag canvas | **NDDG** tab |
+| 🍄 **Random Organic Gradient** | Random blob-field gradients from a random or hand-picked palette | **NDDG** tab |
+| 🍄 **Image Blend** | Nine blend modes with cover-fit and opacity | **NDDG** tab |
 
+## Install
 
-![GreatConditioningModifier_EN_2](https://github.com/user-attachments/assets/7a4d8cd5-0147-45a3-abb8-5599c4b034df)
+**Extensions → Install from URL:**
 
+```text
+https://github.com/aoleg/NDDG_Great_Nodes
+```
 
+or clone into your Forge `extensions` directory and restart:
 
-For Qwen-image, Z-image, Flux1 and Flux2.
+```bash
+git clone https://github.com/aoleg/NDDG_Great_Nodes
+```
 
-  <b>📚 Modifier Guide</b>
+No extra dependencies — everything used (torch, numpy, Pillow, matplotlib) already ships
+in the Forge venv. The before/after graph in *Great Multiply Sigmas* is the only thing
+that needs matplotlib, and it degrades to a log line if it is missing.
 
-🔹 > degree of importance for POSITIVE value modifications
+---
 
-🔸 > degree of importance for NEGATIVE value modifications
+## 🍄 Great Conditioning Modifier
 
-❌ > no use in Positive
+Your prompt becomes a tensor before the model ever sees it. This nudges that tensor —
+adding noise to it, dropping parts of it, rotating it, filtering it — so you get
+variations that a different seed alone will not give you.
 
-<b>🔸 semantic_drift 🔹</b>
+Open the accordion, tick it on, pick a **Method**, and move **Modification strength** off
+zero. Strength 0 is a hard no-op.
 
-Progressive semantic drift
-This modifier gradually blends your original prompt with a noisier version of itself, as if adding artistic blur to your instructions. With positive values, the image gently drifts away from the initial prompt while keeping overall coherence — imagine a concept "drifting" into neighboring interpretations. With negative values, the opposite occurs: the prompt is reinforced and becomes less prone to variation. Perfect for achieving creative variations without losing the original meaning.
+| Control | Default | What it does |
+| --- | --- | --- |
+| Method | `semantic_drift` | Which of the fourteen effects to run |
+| Apply to | `Positive` | `Positive`, `Negative` or `Both` — which side of CFG is modified |
+| Modification strength | `0` | −10 to +10. Negative usually runs the effect the other way |
+| Seed | `-1` | `-1` follows the generation seed, so a new seed gives a new variation |
+| Apply to the Hires. fix pass | on | Whether the second pass is modified too |
+| Debug | off | Logs shapes, means, standard deviations and per-method detail to the console |
 
-<b>🔸🔸🔸 token_dropout 🔹🔹</b>
+All five settings are written into the PNG metadata, restored by **Send to txt2img**, and
+available as **X/Y/Z Plot** axes (`[GCM] Method`, `[GCM] Strength`, `[GCM] Seed`,
+`[GCM] Target`, `[GCM] Enable`).
 
-Selective token removal
-Imagine your prompt is composed of several keywords the model "listens to." This modifier randomly ignores some of them, as if you temporarily changed the subject mid-generation. With positive values, some elements of your description are skipped, creating more abstract or surprising images because the model must "guess" the missing parts. With negative values, the opposite effect forces the model to concentrate on only a few specific tokens, producing cleaner, more focused images.
+### 📚 Modifier guide
 
-<b>🔸🔸🔸 gradient_amplify 🔹🔹</b>
+🔹 = degree of importance for **positive** values &nbsp;·&nbsp; 🔸 = for **negative** values
+&nbsp;·&nbsp; ❌ = no use in that direction
 
-Amplification of conceptual transitions
-This modifier acts on the "transitions" between different elements of your prompt. Think of it as a contrast control for concepts: with positive values, the differences between parts of your description are exaggerated, creating more dramatic images with sharper contrasts between elements. With negative values, transitions are smoothed out, resulting in more harmonious, blended images where everything merges gently. Useful for controlling the dramatic intensity of your generations.
+<details open>
+<summary><b>The fourteen methods</b></summary>
 
-<b>🔸🔸🔸 guided_noise 🔹🔹🔹</b>
+**🔸 semantic_drift 🔹** — *progressive semantic drift*
+Gradually blends your original prompt with a noisier version of itself, as if adding
+artistic blur to your instructions. With positive values, the image gently drifts away
+from the initial prompt while keeping overall coherence — a concept "drifting" into
+neighbouring interpretations. With negative values the opposite occurs: the prompt is
+reinforced and becomes less prone to variation. Good for creative variations that do not
+lose the original meaning.
 
-Proportional guided noise
-This is the most universal and predictable modifier. It adds "creative noise" proportional to the intensity of your prompt — like adding film grain to a photo. With positive values (0.2–0.5), you get natural variations of your base image, perfect for generating several similar but unique versions. With negative values, you subtract this noise, stabilizing the image and making it more predictable. It's the ideal starting tool because its effects are progressive and controllable.
+**🔸🔸🔸 token_dropout 🔹🔹** — *selective token removal*
+Your prompt is a set of keywords the model "listens to". This randomly ignores some of
+them, as if you changed the subject mid-generation. Positive values skip elements of your
+description, producing more abstract or surprising images because the model has to guess
+the missing parts. Negative values invert the mask, forcing the model to concentrate on
+only a few specific tokens — cleaner, more focused images.
 
-<b>🔸 quantize 🔹🔹🔹🔹</b>
+**🔸🔸🔸 gradient_amplify 🔹🔹** — *amplification of conceptual transitions*
+Acts on the transitions *between* elements of your prompt: a contrast control for
+concepts. Positive values exaggerate the differences between parts of your description,
+giving more dramatic images with sharper contrasts. Negative values smooth the transitions
+out, giving more harmonious, blended images where everything merges gently.
 
-Quantization and stabilization
-This modifier reduces the “precision” of the instructions given to the model, like switching from millions of colors to a limited palette. With high positive values (0.5–1.0), the image becomes more stylized and graphic, with stronger choices and fewer subtle nuances — ideal for a simplified artistic rendering. With negative values, the opposite effect adds dithering (fine grain) that enriches details and micro-variations, creating more organic and textured images.
+**🔸🔸🔸 guided_noise 🔹🔹🔹** — *proportional guided noise*
+The most universal and predictable modifier. Adds creative noise proportional to the
+intensity of your prompt, like film grain on a photo. At **0.2 – 0.5** you get natural
+variations of your base image — ideal for several similar but unique versions. Negative
+values subtract that noise, stabilising the image. The best place to start.
 
-<b>🔸🔸🔸 perlin_noise 🔹🔹🔹🔹</b>
+**🔸 quantize 🔹🔹🔹🔹** — *quantisation and stabilisation*
+Reduces the precision of the instructions, like going from millions of colours to a
+limited palette. High positive values (**0.5 – 1.0**) make the image more stylised and
+graphic, with stronger choices and fewer subtle nuances. Negative values instead add
+dithering, enriching details and micro-variations for a more organic, textured result.
 
-Coherent structured noise
-Unlike classic random noise, Perlin noise creates smooth, “natural” variations, like cloud patterns or wood grain. With positive values, your images gain an organic, flowing quality, with soft variations that look natural rather than chaotic. Elements transform gradually instead of changing abruptly. With negative values, you get the opposite effect, which “de-structures” these patterns, creating more fragmented images. Excellent for natural or fluid abstract renderings.
+**🔸🔸🔸 perlin_noise 🔹🔹🔹🔹** — *coherent structured noise*
+Unlike random noise, Perlin noise creates smooth, natural variations — cloud patterns,
+wood grain. Positive values give images an organic, flowing quality where elements
+transform gradually instead of abruptly. Negative values de-structure those patterns into
+something more fragmented. Excellent for natural or fluid abstract renderings.
 
-<b>🔸🔸🔸 fourier_filter ❌</b>
+**🔸🔸🔸 fourier_filter ❌** — *frequency filtering*
+Treats your prompt like a sound wave and filters certain conceptual frequencies. **Only
+useful with negative values**, where it is a low-pass filter that smooths the image by
+keeping only large shapes and general concepts. Positive values are a high-pass that
+strips the constant component of the conditioning and generally destroys the prompt.
 
-NON-FUNCTIONAL frequency filtering
-This modifier analyzes your prompt like a sound wave and filters certain conceptual “frequencies.” It only works with negative values: it's a low-pass filter that smooths the image by keeping only large shapes and general concepts (like keeping only bass tones). Think of it as an equalizer for your visual concepts.
+**🔸 style_shift 🔹** — *directional style shift*
+Pushes your prompt in a random but coherent direction in concept space, like a knob that
+gradually changes the global style. Positive values explore significant stylistic
+variations while keeping the subject — photorealistic to painterly, one lighting style to
+another. Negative values reverse the direction.
 
-<b>🔸 style_shift 🔹</b>
+**🔸 temperature_scale 🔹** — *creativity control*
+The model's creative freedom, exactly like the temperature parameter of a text model. At
+**0.5 – 1.0** the model is bolder and more unpredictable, taking artistic liberties.
+Negative values make it conservative and literal. The slider between "surprise me" and "do
+exactly what I say".
 
-Directional style shift
-This modifier pushes your prompt in a random but coherent “direction” in concept space, like turning a knob that gradually changes the global style. With positive values, you explore significant stylistic variations while keeping the subject — the image may shift from photorealistic to painterly, or from one lighting style to another. With negative values, the direction is reversed. Perfect for discovering unexpected stylistic interpretations of your prompt.
+**🔸 embedding_mix 🔹** — *mixing and reorganisation*
+Rearranges the internal order of the elements of your prompt, like shuffling a deck.
+Positive values mix different parts of your description, producing unexpected combinations
+— a character may inherit attributes intended for the background. Negative values unmix,
+accentuating the separations and making each element more distinct.
 
-<b>🔸 temperature_scale 🔹</b>
+**🔸 svd_filter 🔹** — *complexity-based filtering (advanced)*
+Decomposes your prompt into complexity components and modifies them selectively. Positive
+values amplify mid-level detail, enriching nuance and visual sophistication. Negative
+values simplify by reducing those components, giving more minimalistic, clean images.
 
-Creativity control
-This modifier controls the model’s “creative freedom,” exactly like the temperature parameter in text-based AIs. With positive values (0.5–1.0), the model becomes bolder and more unpredictable, taking artistic liberties with your prompt — ideal for creative exploration. With negative values, the model becomes conservative and predictable, following your prompt strictly with few variations — perfect for consistency and replication. It's the slider between “surprise me” and “do exactly what I say.”
+**🔸 spherical_rotation 🔹** — *conceptual rotation (advanced)*
+Rotates your prompt in multidimensional concept space while preserving its overall
+intensity, like rotating a 3D object. High positive values give radical variations that
+keep the weight of the original prompt but explore entirely different angles. Results can
+be very surprising: the subject remains, but its interpretation changes dramatically.
 
-<b>🔸 embedding_mix 🔹</b>
+**🔸 principal_component 🔹** — *modification of principal axes (advanced)*
+Identifies the principal axes of your prompt — the most important directions of variation
+— and alters them. Positive values amplify the dominant axes, pushing the main features of
+your description to the extreme. Negative values attenuate them, simplifying the image by
+reducing conceptual dimensionality.
 
-Mixing and reorganization
-This modifier rearranges the internal order of elements in your prompt, like shuffling a deck of cards. With positive values, different parts of your description are “mixed,” creating unexpected combinations — a character might inherit attributes intended for the background. With negative values, the effect “unmixes” by accentuating separations, making each element more distinct. Useful for creative hybridizations or, on the contrary, clearly separating concepts.
+**🔸 block_shuffle 🔹** — *block-based reorganisation*
+Cuts your prompt into conceptual blocks and rearranges them randomly, preserving coherence
+inside each block. It is less radical than `embedding_mix` because local structure
+survives. Perfect for unusual compositions with recognisable elements.
 
-<b>🔸 svd_filter 🔹</b>
+</details>
 
-Complexity-based filtering (Advanced)
-This modifier mathematically decomposes your prompt into “complexity components” and selectively modifies them. With positive values, it amplifies mid-level details, enriching nuances and visual sophistication. With negative values, it simplifies the concept by reducing those components, producing more minimalistic, clean images. Think of it as a filter that controls the “conceptual richness” of your generation.
+### 💡 Usage tips
 
-<b>🔸 spherical_rotation 🔹</b>
+* **Beginners** — `guided_noise` at 0.2 – 0.4, `temperature_scale` at 0.5 – 0.7
+* **Subtle variations** — `perlin_noise` at 0.1 – 0.3, `semantic_drift` at 0.2
+* **Creative exploration** — `style_shift` at 0.5 – 0.8, `spherical_rotation` at 0.6 – 1.0
+* **Stabilisation** — negative `temperature_scale`, −0.3 to −0.5
+* **Artistic effects** — `quantize` at 0.7 – 1.0, `block_shuffle` at 1.0 – 2.0
 
-Conceptual rotation (Advanced)
-This modifier “rotates” your prompt in the multidimensional concept space while preserving its overall intensity, like rotating a 3D object. With high positive values, you get radical variations that keep the “weight” of the original prompt but explore entirely different angles. Results can be very surprising because the subject remains, but its interpretation changes dramatically. Excellent for extreme creative exploration.
+### Three things worth knowing
 
-<b>🔸 principal_component 🔹</b>
+* **`block_shuffle` needs |strength| ≥ 1.0.** Below that the block size is larger than half
+  the sequence, only one block exists, and there is nothing to shuffle — the method does
+  nothing at all. It also ignores the sign: −1.5 and +1.5 give the same result.
+* **`fourier_filter` at a positive strength is a high-pass filter.** It removes the
+  constant component of the conditioning, which is most of the prompt. Use negative
+  values.
+* **`principal_component` declines very wide embeddings.** It builds a
+  `features × features` covariance matrix, which is fine at SDXL's 2048 or Flux's 4096 but
+  is several gigabytes at Krea 2 / Qwen-Image's 30720. Above 8192 features it logs a line
+  and leaves the conditioning alone rather than exhausting VRAM.
 
-Modification of principal axes (Advanced)
-This modifier identifies the “principal axes” of your prompt (the most important directions of variation) and alters them. With positive values, it amplifies these dominant axes, pushing the main features of your description to the extreme. With negative values, it attenuates them, simplifying the image by reducing conceptual dimensionality. It’s like choosing between “emphasize what matters most” and “flatten to simplify.”
+---
 
-<b>🔸 block_shuffle 🔹</b>
+## 🍄 Great Multiply Sigmas
 
-Block-based reorganization
-This modifier cuts your prompt into conceptual “blocks” and rearranges them randomly while preserving coherence inside each block. With increasing positive values, the blocks become smaller and the shuffle more chaotic, creating surreal images where elements appear in unexpected order. It’s less radical than embedding_mix because local structure is preserved. Perfect for creating unusual compositions while keeping recognizable elements.
+Scales the noise schedule that your chosen **Schedule type** produced — the Forge
+equivalent of the ComfyUI `MultiplySigmas` node, with a curve and a zone on top. Lower
+sigmas late in the run bring out fine detail; higher ones loosen it up. Built on top of
+the idea in [ComfyUI-Detail-Daemon](https://github.com/Jonseed/ComfyUI-Detail-Daemon).
 
-<b>💡 General Usage Tips</b>
+| Control | Default | What it does |
+| --- | --- | --- |
+| Global factor | `1` | Multiplies the whole zone, on top of the start/end interpolation |
+| Start factor / End factor | `1` / `1` | The factor at the beginning and at the end of the zone |
+| Zone start / Zone end | `0` / `1` | Fraction of the schedule to touch; sigmas outside are left exactly as they were |
+| Curve | `linear` | How the start factor is interpolated into the end factor |
+| Curve strength | `2` | `s_curve` only — higher is a sharper transition |
+| Apply to the Hires. fix pass | on | Whether the second pass is scaled too |
+| Show preview | off | Adds a before/after graph of the schedule to the gallery |
 
-• Beginners: Start with guided_noise (0.2–0.4) and temperature_scale (0.5–0.7)
-• Subtle variations: perlin_noise (0.1–0.3), semantic_drift (0.2)
-• Creative exploration: style_shift (0.5–0.8), spherical_rotation (0.6–1.0)
-• Stabilization: Negative values on temperature_scale (–0.3 to –0.5)
-• Artistic effects: quantize (0.7–1.0), block_shuffle (0.5–0.8)
+All three factors at `1` is a no-op and the schedule is left untouched.
 
-<b>Don't forget: Change the seed of the node to get different variations with the same parameters!</b>
+Your **Sampling method**, **Schedule type**, *Discard penultimate sigma* and the
+sigma-min/sigma-max overrides in Settings all still run first — this only scales what they
+produced. `s_curve` is a plain sigmoid, so the start and end factors are targets it
+approaches rather than values it lands on exactly; `linear` hits both.
 
+---
 
+## 🍄 The NDDG tab
 
- 
-<img width="2310" height="900" alt="🍄Great_Conditioning_node" src="https://github.com/user-attachments/assets/1dbc3b63-c14e-49bb-b3ff-c5c2cd0f68c0" />
+Three image tools that produce a picture and hand it straight to
+**txt2img / img2img / inpaint / extras** with the standard *Send to* buttons.
 
-________________________________________
-________________________________________
+### Interactive Gradient
 
-<b>🍄Great Interactive Gradient Node</b>
-![Interactive_Gradient_Node](https://github.com/user-attachments/assets/94572120-eef0-496e-9b32-6506d0a68c2d)
+One blob per colour stop, blurred, faded and composited in order. The canvas is the
+editor:
 
-________________________________________
-________________________________________
+* **click** empty space to add a stop in the current colour
+* **drag** a stop to move it
+* **click** a stop to select it, then use the colour picker to recolour it
+* **right-click** a stop to remove it
 
-<b>🍄Great Random Organic Gradient Node</b>
+The JSON textbox underneath is what the generator actually reads, and stays editable by
+hand. Eleven blob shapes: `circle`, `radial`, `donut`, `rectangle`, `horizontal_stripe`,
+`vertical_stripe`, `diamond`, `triangle`, `star`, `blob_random`, `spore`. **Radial
+smoothness** controls both the falloff of the `radial` shape and the sharpness of the
+colour interpolation. The seed only matters for `blob_random` and `spore`, the two shapes
+with randomised outlines.
 
-<img width="1194" height="816" alt="image" src="https://github.com/user-attachments/assets/f857fb4a-0fae-46a5-8540-2d34324e0b6e" />
+### Random Organic Gradient
 
-________________________________________
-________________________________________
+Scatters blobs from a palette across the canvas and blurs the lot. Leave **Random palette**
+on for a fresh palette every run, or turn it off to pick up to eight colours yourself —
+unset slots are filled randomly. Backgrounds can be a fixed colour, random, or fully
+transparent. A seed of `-1` randomises and reports back the seed it used, so a result you
+like can be reproduced.
 
-<b>🍄Great_thick_border.js</b>
+### Image Blend
 
-To see immediately which node is currently running!!
+Image B is scaled to *cover* image A, centre-cropped, then blended over it with one of
+`normal`, `multiply`, `screen`, `overlay`, `add`, `subtract`, `difference`, `lighten`,
+`darken` at the chosen opacity. The result keeps A's dimensions.
 
-<img width="1423" height="777" alt="image" src="https://github.com/user-attachments/assets/5cb387c3-a447-419c-94e9-d52dc59ca197" />
+---
 
-<img width="361" height="779" alt="image" src="https://github.com/user-attachments/assets/36510418-e63a-4435-94b0-7a1504b12365" />
+## Layout
 
-________________________________________
-________________________________________
+```text
+scripts/nddg_conditioning_modifier.py   the on_cfg_denoiser hook
+scripts/nddg_multiply_sigmas.py         the get_sigmas wrapper
+scripts/nddg_tab.py                     the NDDG tab
+javascript/nddg_gradient_editor.js      the colour-stop canvas
+lib_nddg/conditioning.py                the fourteen modifiers
+lib_nddg/sigmas.py                      zone/curve scaling + the preview graph
+lib_nddg/generators.py                  the gradient and blend maths
+lib_nddg/xyz.py                         X/Y/Z Plot axes
+tests/harness.py                        offline test harness — no GPU, no model, no webui
+```
 
-<b>🍄Great Multiply Sigmas</b>
+To run the tests, use the webui's own interpreter so torch and Pillow are on the path:
 
-This node adds functionality to the Jonseed node (https://github.com/Jonseed/ComfyUI-Detail-Daemon) with the additional option "s_curve" to apply the changes.
-You can now also choose different values ​​for the start and end of the affected area.
-An optional display is also available, allowing you to visualize the curve before and after the changes.
-You can also chain these nodes for better control.
+```bash
+sd-webui-forge-classic/venv/Scripts/python.exe tests/harness.py
+```
 
-![node-great-sigmas](https://github.com/user-attachments/assets/9f009493-e03f-4f0b-b7f1-11de75984452)
+## Credits
 
-________________________________________
-________________________________________
+Originally written by **NDDG** as a ComfyUI node pack. *Great Multiply Sigmas* extends the
+`MultiplySigmas` node from
+[Jonseed/ComfyUI-Detail-Daemon](https://github.com/Jonseed/ComfyUI-Detail-Daemon) with an
+s-curve, separate start/end factors and a preview.
