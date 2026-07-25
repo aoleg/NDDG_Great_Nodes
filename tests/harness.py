@@ -142,78 +142,134 @@ from lib_nddg import sigmas as sigma_core
 
 schedule = torch.tensor([14.6, 10.0, 6.0, 3.0, 1.5, 0.7, 0.3, 0.0])
 
-out, s, e, _ = sigma_core.multiply_sigmas(schedule, factor_global=1.0, start_factor=1.0, end_factor=1.0)
-check(torch.equal(out, schedule), "identity settings changed the schedule")
-check((s, e) == (0, 7), f"identity zone was {(s, e)}, expected (0, 7)")
+#   Krea 2 / Beta(0.6, 0.6) / 8 steps, the schedule the live testing ran on: sigma is a
+#   mixing coefficient here, it starts at exactly 1.0, and the signal margin `1 - sigma`
+#   at index 1 is only 0.0499 before anything is scaled
+flow = torch.tensor([1.0, 0.9501, 0.8434, 0.7011, 0.5359, 0.3616, 0.1983, 0.0661, 0.0])
 
-out, s, e, _ = sigma_core.multiply_sigmas(schedule, factor_global=2.0, start_factor=1.0, end_factor=1.0, clamp_to_max=False)
-check(torch.allclose(out, schedule * 2.0), "global factor 2.0 did not double the schedule")
+
+def scaled(sigmas, **kw):
+    kw.setdefault("guard", False)
+    return sigma_core.multiply_sigmas(sigmas, **kw)
+
+
+def guarded(sigmas, **kw):
+    return sigma_core.multiply_sigmas(sigmas, guard=True, **kw)
+
+
+def invariants(report, name):
+    """The two things a sampler cannot survive. Verified on every guarded output."""
+
+    check(not report.backward, f"{name}: schedule steps backwards at {report.backward}")
+    if report.is_flow:
+        check(report.min_signal > 0.0, f"{name}: signal margin {report.min_signal} is not positive")
+
+
+r = scaled(schedule, factor_global=1.0, start_factor=1.0, end_factor=1.0)
+check(torch.equal(r.sigmas, schedule), "identity settings changed the schedule")
+check(r.zone == (0, 7), f"identity zone was {r.zone}, expected (0, 7)")
+check(r.is_flow is False, "an epsilon schedule was read as flow")
+check(scaled(flow).is_flow is True, "a flow schedule was not detected")
+check(scaled(schedule, is_flow=True).is_flow is True, "an explicit is_flow was ignored")
+
+r = scaled(schedule, factor_global=2.0, start_factor=1.0, end_factor=1.0)
+check(torch.allclose(r.sigmas, schedule * 2.0), "global factor 2.0 did not double the schedule")
 
 # zone limiting: only [zone_start_idx, zone_end_idx] moves
-out, s, e, _ = sigma_core.multiply_sigmas(schedule, factor_global=0.5, zone_start=0.5, zone_end=1.0)
-check((s, e) == (3, 7), f"zone indices {(s, e)}, expected (3, 7)")
-check(torch.equal(out[:3], schedule[:3]), "sigmas before the zone were modified")
-check(torch.allclose(out[3:], schedule[3:] * 0.5), "sigmas inside the zone were not halved")
+r = scaled(schedule, factor_global=0.5, zone_start=0.5, zone_end=1.0)
+check(r.zone == (3, 7), f"zone indices {r.zone}, expected (3, 7)")
+check(torch.equal(r.sigmas[:3], schedule[:3]), "sigmas before the zone were modified")
+check(torch.allclose(r.sigmas[3:], schedule[3:] * 0.5), "sigmas inside the zone were not halved")
 
 # linear interpolation between start and end factor
-out, s, e, _ = sigma_core.multiply_sigmas(schedule, start_factor=1.0, end_factor=2.0, curve_type="linear")
+r = scaled(schedule, start_factor=1.0, end_factor=2.0, curve_type="linear")
 expected = schedule.clone()
 for i in range(8):
     expected[i] *= 1.0 + (2.0 - 1.0) * (i / 7)
-check(torch.allclose(out, expected), "linear start->end interpolation mismatch")
+check(torch.allclose(r.sigmas, expected), "linear start->end interpolation mismatch")
 
 # s_curve is normalised: it changes the shape between the endpoints, and hits both
-out_s, _, _, _ = sigma_core.multiply_sigmas(schedule, start_factor=1.0, end_factor=2.0, curve_type="s_curve", curve_strength=2.0)
-check(not torch.allclose(out_s, expected), "s_curve matched linear")
-#   a flat schedule makes the factor readable straight off the output; the real one ends
-#   at 0.0, where any factor is invisible
 flat = torch.ones(9)
-curve, _, _, _ = sigma_core.multiply_sigmas(flat, start_factor=1.0, end_factor=2.0, curve_type="s_curve", curve_strength=2.0, clamp_to_max=False)
+curve = scaled(flat, start_factor=1.0, end_factor=2.0, curve_type="s_curve", curve_strength=2.0).sigmas
 check(abs(float(curve[0]) - 1.0) < 1e-6, f"s_curve did not hit the start factor (got {float(curve[0]):.6f})")
 check(abs(float(curve[-1]) - 2.0) < 1e-6, f"s_curve did not hit the end factor (got {float(curve[-1]):.6f})")
-line, _, _, _ = sigma_core.multiply_sigmas(flat, start_factor=1.0, end_factor=2.0, curve_type="linear", clamp_to_max=False)
+line = scaled(flat, start_factor=1.0, end_factor=2.0, curve_type="linear").sigmas
 check(abs(float(line[4]) - 1.5) < 1e-6, "linear midpoint is not halfway")
 check(abs(float(curve[4]) - 1.5) < 1e-6, "s_curve midpoint is not halfway")
 check(sigma_core.interpolate_curve(0.0, "s_curve", 2.0) == 0.0, "interpolate_curve(0) != 0")
 check(abs(sigma_core.interpolate_curve(1.0, "s_curve", 2.0) - 1.0) < 1e-12, "interpolate_curve(1) != 1")
 check(abs(sigma_core.interpolate_curve(0.5, "s_curve", 2.0) - 0.5) < 1e-12, "s_curve is not symmetric about 0.5")
-#   curve strength must change shape only, never overall strength
 for strength in (0.1, 1.0, 5.0, 10.0):
     check(sigma_core.interpolate_curve(0.0, "s_curve", strength) == 0.0, f"s_curve strength {strength}: t=0 != 0")
     check(abs(sigma_core.interpolate_curve(1.0, "s_curve", strength) - 1.0) < 1e-12, f"s_curve strength {strength}: t=1 != 1")
 
-# the clamp: sigmas may never exceed the schedule's own maximum
-tight, _, _, clamped = sigma_core.multiply_sigmas(schedule, start_factor=1.2, end_factor=1.2, clamp_to_max=True)
-check(clamped > 0, "clamp reported nothing on an inflating schedule")
-check(float(tight.max()) <= float(schedule.max()) + 1e-6, "clamped schedule still exceeds its maximum")
-check(torch.allclose(tight[0], schedule[0]), "clamp did not pin the first sigma")
-loose, _, _, unclamped = sigma_core.multiply_sigmas(schedule, start_factor=1.2, end_factor=1.2, clamp_to_max=False)
-check(unclamped == 0, "clamp counted while disabled")
-check(float(loose.max()) > float(schedule.max()), "disabling the clamp did not let sigmas exceed the maximum")
-#   deflation is always safe and must never trip the clamp
-_, _, _, none_clamped = sigma_core.multiply_sigmas(schedule, start_factor=0.9, end_factor=0.8, clamp_to_max=True)
-check(none_clamped == 0, "the clamp fired on a purely deflating schedule")
-
-#   a flow-matching schedule: sigma is a mixing coefficient and 1.0 is a hard ceiling
-flow = torch.tensor([1.0, 0.9887, 0.9650, 0.9324, 0.8913, 0.5359, 0.1400, 0.0161, 0.0])
-capped, _, _, hits = sigma_core.multiply_sigmas(flow, start_factor=1.10, end_factor=0.85, zone_start=0.0, zone_end=1.0, clamp_to_max=True)
-check(float(capped.max()) <= 1.0 + 1e-6, f"flow schedule exceeded 1.0: {float(capped.max())}")
-check(hits > 0, "the clamp did not fire on an inflated flow schedule")
-check((1.0 - capped >= -1e-6).all(), "the data coefficient (1 - sigma) went negative")
-
 # reversed zone is swapped, not empty
-_, s, e, _ = sigma_core.multiply_sigmas(schedule, zone_start=0.9, zone_end=0.1)
-check(s < e, f"reversed zone was not swapped: {(s, e)}")
+swapped = scaled(schedule, zone_start=0.9, zone_end=0.1).zone
+check(swapped[0] < swapped[1], f"reversed zone was not swapped: {swapped}")
 
 # input is never mutated
 copy = schedule.clone()
-sigma_core.multiply_sigmas(schedule, factor_global=3.0)
+scaled(schedule, factor_global=3.0)
 check(torch.equal(schedule, copy), "multiply_sigmas mutated its input")
 
 check(sigma_core.is_identity(1.0, 1.0, 1.0), "is_identity(1,1,1) was False")
 check(not sigma_core.is_identity(1.0, 1.0, 1.2), "is_identity missed a non-identity")
+check(sigma_core.multiply_sigmas(torch.tensor([])).sigmas.numel() == 0, "empty schedule was not handled")
 
-check(sigma_core.multiply_sigmas(torch.tensor([]))[0].numel() == 0, "empty schedule was not handled")
+# ---- the safety guard, against settings that were observed to fail in a live run -------
+
+#   Start 1.06 / End 0.85 / Zone 0.2 came back a black image.  Unguarded it puts sigma[1]
+#   at 1.0071 - a NEGATIVE signal margin, and above sigma[0] as well.
+raw = scaled(flow, start_factor=1.06, end_factor=0.85, zone_start=0.2, zone_end=1.0)
+check(float(raw.sigmas[1]) > 1.0, "the 1.06 case no longer exceeds 1.0 unguarded")
+check(raw.min_signal < 0.0, f"expected a negative signal margin unguarded, got {raw.min_signal}")
+check(raw.backward, "expected a backward step unguarded")
+
+fixed = guarded(flow, start_factor=1.06, end_factor=0.85, zone_start=0.2, zone_end=1.0)
+invariants(fixed, "start 1.06 zone 0.2")
+check(1 in fixed.guarded, f"the guard did not touch index 1 (touched {fixed.guarded})")
+#   and specifically NOT to 1.0 exactly, which is what the old clamp-to-maximum did: that
+#   makes `1 - sigma` zero, and sample_euler_ancestral_RF divides by it
+check(float(fixed.sigmas[1]) < 1.0 - 1e-6, f"the guard capped at the maximum ({float(fixed.sigmas[1])})")
+
+#   Start 1.15 / Zone 0.3 read as degraded; Start 1.25 / Zone 0.4 as a mid-run breakdown.
+#   Both step backwards unguarded.
+for start, zone, name in ((1.15, 0.3, "start 1.15 zone 0.3"), (1.25, 0.4, "start 1.25 zone 0.4")):
+    loose = scaled(flow, start_factor=start, end_factor=0.85, zone_start=zone, zone_end=1.0)
+    check(loose.backward, f"{name}: expected a backward step unguarded")
+    invariants(guarded(flow, start_factor=start, end_factor=0.85, zone_start=zone, zone_end=1.0), name)
+
+#   Global 1.05 at zone 0.1 and 0.2 both came back black.  At 8 steps zone 0.1 resolves to
+#   index 0, where sigma is exactly 1.0 - the slider does not mean what it looks like.
+check(sigma_core.zone_indices(len(flow), 0.1, 1.0)[0] == 0, "zone 0.1 no longer resolves to index 0 at 8 steps")
+check(sigma_core.zone_indices(len(flow), 0.2, 1.0)[0] == 1, "zone 0.2 no longer resolves to index 1 at 8 steps")
+for zone in (0.1, 0.2, 0.3):
+    invariants(guarded(flow, factor_global=1.05, zone_start=zone, zone_end=1.0), f"global 1.05 zone {zone}")
+
+#   deflation cannot trip either invariant, so the guard must keep its hands off it
+for start, end in ((0.98, 0.85), (0.95, 1.0), (0.7, 0.7)):
+    report = guarded(flow, start_factor=start, end_factor=end, zone_start=0.2, zone_end=1.0)
+    invariants(report, f"deflation {start}->{end}")
+    check(not report.guarded, f"the guard touched a purely deflating schedule ({start}->{end})")
+
+#   ...and it must be a no-op on an unmodified schedule, on both model families
+for sigmas, name in ((schedule, "epsilon"), (flow, "flow")):
+    report = guarded(sigmas)
+    check(not report.guarded, f"{name}: the guard touched an unmodified schedule")
+    check(torch.equal(report.sigmas, sigmas), f"{name}: the guard changed an unmodified schedule")
+    invariants(report, f"{name} baseline")
+
+#   exhaustive sweep: whatever the settings, a guarded schedule is always runnable
+broken = []
+for start in (0.7, 0.9, 1.0, 1.1, 1.2, 1.3):
+    for end in (0.7, 0.85, 1.0, 1.3):
+        for zone in (0.0, 0.1, 0.2, 0.4, 0.6):
+            for glob in (0.5, 1.0, 1.3, 2.0):
+                for sigmas, name in ((flow, "flow"), (schedule, "epsilon")):
+                    report = guarded(sigmas, factor_global=glob, start_factor=start, end_factor=end, zone_start=zone, zone_end=1.0)
+                    if report.backward or (report.is_flow and report.min_signal <= 0.0):
+                        broken.append(f"{name} g={glob} s={start} e={end} z={zone}")
+check(not broken, f"the guard let {len(broken)} setting(s) through: {broken[:3]}")
 
 graph = sigma_core.comparison_graph(schedule, schedule * 0.8, 2, 6)
 check(graph is not None and graph.size[0] > 100, "comparison_graph did not render")
@@ -519,8 +575,8 @@ class FakeSampler:
         return torch.linspace(14.6, 0.0, steps + 1)
 
 
-def gms_ui(enable=True, factor_global=1.0, start_factor=1.0, end_factor=2.0, zone_start=0.0, zone_end=1.0, curve="linear", curve_strength=2.0, clamp=False, apply_to_hr=True, preview=False):
-    return [enable, factor_global, start_factor, end_factor, zone_start, zone_end, curve, curve_strength, clamp, apply_to_hr, preview]
+def gms_ui(enable=True, factor_global=1.0, start_factor=1.0, end_factor=2.0, zone_start=0.0, zone_end=1.0, curve="linear", curve_strength=2.0, guard=False, apply_to_hr=True, preview=False):
+    return [enable, factor_global, start_factor, end_factor, zone_start, zone_end, curve, curve_strength, guard, apply_to_hr, preview]
 
 
 # identity settings must not wrap at all
@@ -588,23 +644,53 @@ check(len(processed.extra_images) == 1, f"expected 1 preview image, got {len(pro
 check(GMS.previews == {}, "postprocess did not clear the previews")
 check(GMS.enabled is False, "postprocess did not reset `enabled`")
 
-# the clamp reaches the wrapper, caps the schedule, and says so
+# the guard reaches the wrapper, fixes the schedule, and says so
 LOGGER.lines.clear()
 p = FakeP()
 p.sampler = FakeSampler()
-sigma_script.process(p, *gms_ui(start_factor=1.3, end_factor=1.3, clamp=True))
-sigma_script.process_before_every_sampling(p, *gms_ui(start_factor=1.3, end_factor=1.3, clamp=True))
-clamped_schedule = p.sampler.get_sigmas(p, 8)
-check(float(clamped_schedule.max()) <= 14.6 + 1e-4, f"the wrapper let a sigma past the maximum ({float(clamped_schedule.max())})")
-check(any(kind == "warning" and "clamped" in line for kind, line in LOGGER.lines), "the clamp fired without warning")
-check(p.extra_generation_params["GMS clamp"] is True, "the clamp is missing from the infotext")
+sigma_script.process(p, *gms_ui(start_factor=1.3, end_factor=1.3, guard=True))
+sigma_script.process_before_every_sampling(p, *gms_ui(start_factor=1.3, end_factor=1.3, guard=True))
+result = p.sampler.get_sigmas(p, 8)
+check(float(result.max()) <= 14.6 + 1e-4, f"the wrapper let a sigma past the maximum ({float(result.max())})")
+check(all(float(result[i + 1]) < float(result[i]) for i in range(len(result) - 2)), "the wrapper produced a non-decreasing schedule")
+check(any(kind == "warning" and "guard" in line for kind, line in LOGGER.lines), "the guard fired without warning")
+check(p.extra_generation_params["GMS guard"] is True, "the guard is missing from the infotext")
 
-# with the clamp off the same settings run free
+# the schedule diagnostic is logged whether or not anything went wrong
+check(any("before:" in line for _, line in LOGGER.lines), "the before schedule was not logged")
+check(any("after:" in line for _, line in LOGGER.lines), "the after schedule was not logged")
+check(any("zone indices" in line for _, line in LOGGER.lines), "the resolved zone indices were not logged")
+
+# a flow model is detected from the predictor, not guessed from the schedule
+LOGGER.lines.clear()
 p = FakeP()
 p.sampler = FakeSampler()
-sigma_script.process(p, *gms_ui(start_factor=1.3, end_factor=1.3, clamp=False))
-sigma_script.process_before_every_sampling(p, *gms_ui(start_factor=1.3, end_factor=1.3, clamp=False))
-check(float(p.sampler.get_sigmas(p, 8).max()) > 14.6, "disabling the clamp did not let the schedule inflate")
+p.sd_model = types.SimpleNamespace(
+    forge_objects=types.SimpleNamespace(
+        unet=types.SimpleNamespace(model=types.SimpleNamespace(predictor=types.SimpleNamespace(prediction_type="const")))
+    )
+)
+sigma_script.process(p, *gms_ui(start_factor=1.1, guard=True))
+sigma_script.process_before_every_sampling(p, *gms_ui(start_factor=1.1, guard=True))
+p.sampler.get_sigmas(p, 8)
+check(GMS.is_flow is True, "the flow predictor was not detected")
+check(any("mixing coefficient" in line for _, line in LOGGER.lines), "the flow model was not reported in the log")
+check(any("signal" in line for _, line in LOGGER.lines), "the signal margin was not logged")
+
+# an unreachable predictor degrades to inference rather than raising
+p = FakeP()
+p.sampler = FakeSampler()
+sigma_script.process(p, *gms_ui(start_factor=1.1, guard=True))
+sigma_script.process_before_every_sampling(p, *gms_ui(start_factor=1.1, guard=True))
+check(GMS.is_flow is None, f"a missing predictor was not reported as unknown (got {GMS.is_flow})")
+p.sampler.get_sigmas(p, 8)
+
+# with the guard off the same settings run free
+p = FakeP()
+p.sampler = FakeSampler()
+sigma_script.process(p, *gms_ui(start_factor=1.3, end_factor=1.3, guard=False))
+sigma_script.process_before_every_sampling(p, *gms_ui(start_factor=1.3, end_factor=1.3, guard=False))
+check(float(p.sampler.get_sigmas(p, 8).max()) > 14.6, "disabling the guard did not let the schedule inflate")
 
 # a non-tensor schedule passes straight through
 p = FakeP()

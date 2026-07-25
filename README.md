@@ -206,15 +206,18 @@ equivalent of the ComfyUI `MultiplySigmas` node, with a curve and a zone on top.
 sigmas late in the run bring out fine detail; higher ones loosen it up. Built on top of
 the idea in [ComfyUI-Detail-Daemon](https://github.com/Jonseed/ComfyUI-Detail-Daemon).
 
+Unlike the Conditioning Modifier above, this **can** and will ruin an image. Read the
+section after the table before moving anything.
+
 | Control | Range | Default | What it does |
 | --- | --- | --- | --- |
-| Global factor | 0.50 – 2.00, step 0.005 | `1` | Multiplies the whole zone, on top of the start/end interpolation. The weak knob |
+| Global factor | 0.50 – 2.00, step 0.005 | `1` | Multiplies the whole zone, on top of the start/end interpolation |
 | Start factor | 0.70 – 1.30, step 0.001 | `1` | The factor at the beginning of the zone. **Above 1.0 this is the dangerous one** |
 | End factor | 0.70 – 1.30, step 0.001 | `1` | The factor at the end of the zone. Far more forgiving |
 | Zone start / Zone end | 0 – 1, step 0.01 | `0` / `1` | Fraction of the schedule to touch; sigmas outside are left exactly as they were |
 | Curve | — | `linear` | How the start factor is interpolated into the end factor |
 | Curve strength | 0.1 – 10 | `2` | `s_curve` only — higher is a sharper transition |
-| Clamp to schedule maximum | — | on | Never let a scaled sigma exceed the schedule's own maximum |
+| Safety guard | — | on | Keeps the schedule strictly decreasing, and its signal margin positive on flow models |
 | Apply to the Hires. fix pass | — | on | Whether the second pass is scaled too |
 | Show preview | — | off | Adds a before/after graph of the schedule to the gallery |
 
@@ -227,79 +230,109 @@ shape of the transition between them and nothing else.
 
 ### ⚠️ Read this before touching the sliders
 
-**This is a sharp instrument, and the useful range is narrow.** Everything worth having
-lives roughly between **0.85 and 1.10**, which is why the sliders now stop at 0.70 / 1.30
-and step in thousandths. For scale, on Krea 2 at 20 steps:
+**This is a sharp instrument and the useful range is narrow.** Everything worth having
+lives roughly between **0.85 and 1.10**, which is why the sliders stop at 0.70 / 1.30 and
+step in thousandths.
 
-* Start factor `1.05`, End factor `0.85`, Zone `0.2 → 1.0` gives a *very* different but
-  still coherent image.
-* Start factor `1.10` at the same zone is practically pure noise.
-* The same `1.10 → 0.85` with Zone start `0.4` is barely distinguishable from disabled.
+Measured on Krea 2 Turbo, Euler a, Beta, 8 steps, CFG 1:
 
-Three separate mechanisms are at work, and they are not equally strong.
+| Setting | Result |
+| --- | --- |
+| Start `0.98`, End `0.85`, Zone `0.2 → 1.0` | usable, minor perceivable changes |
+| Start `1.06`, End `0.85`, Zone `0.3 → 1.0` | coherent, clearly changed — a good setting |
+| Start `1.06`, End `0.85`, Zone `0.2 → 1.0` | **black image** |
+| Start `1.15`, End `0.85`, Zone `0.3 → 1.0` | major composition shift, coherent but imperfect |
+| Start `1.25`, End `0.85`, Zone `0.4 → 1.0` | breaks mid-generation; blurry, unfinished |
+| Global `0.95`, Zone `0.1 → 1.0` | major composition shift, coherent |
+| Global `1.05`, Zone `0.1 → 1.0` or `0.2 → 1.0` | **black image** |
+| Global `1.05`, Zone `0.3 → 1.0` | coherent, barely different from disabled |
 
-#### 1. Global factor is nearly inert
+Every one of those is explained by two properties of the scaled schedule, both of which
+the extension now computes and logs before sampling starts.
 
-Scaling the whole schedule by a constant cancels out of the sampler's update — the step it
-takes through latent space is unchanged. Measured on a Karras schedule, the per-step ratio
-is exactly `1.0000` even at Global factor `2.0`. All that is left is the model being told a
-noise level the latent does not carry, plus the initial-noise magnitude if the zone reaches
-`sigmas[0]`.
+#### The schedule must keep decreasing
 
-#### 2. Start → End compounds
+A scaled sigma that lands at or above its predecessor makes the sampler step *backwards*.
+In `sample_euler_ancestral_RF` that puts a negative number under the square root of
+`renoise_coeff` — a NaN, and a ruined image.
 
-A *varying* factor changes the ratio between consecutive sigmas, so every step removes a
-little more or less than intended. The per-step drift is `(end/start) ^ (1 / zone_steps)`,
-which has a consequence worth internalising: **the same start/end pair is not the same
-strength at a different step count.** `1.05 → 0.85` is 1.3% per step over a 16-step zone
-but 0.66% over 32. Re-tune when you change steps.
+That is the `1.15 / Zone 0.3` and `1.25 / Zone 0.4` rows. On this schedule σ[1] = 0.9501
+and σ[2] = 0.8434, so a start factor of 1.15 lifts σ[2] to 0.9699 — *above* σ[1]. The
+further into the run the reversal lands, the fewer steps remain to recover from it, which
+is why 1.25 at Zone 0.4 breaks visibly mid-generation rather than merely degrading.
 
-#### 3. On flow-matching models, sigma has a hard ceiling — and that is the real cliff
+#### On flow-matching models, sigma is a mixing coefficient
 
-This is the one that explains the 1.05/1.10 result above, and it is specific to
-**Krea 2, Flux, SD3, Qwen and Wan** (anything whose predictor reports
-`prediction_type == "const"`).
-
-For those models sigma is not a noise *scale*. It is the mixing coefficient of
+For **Krea 2, Flux, SD3, Qwen and Wan** — anything whose predictor reports
+`prediction_type == "const"` — sigma is not a noise *scale*. It is the mixing coefficient of
 
 ```text
 x = sigma · noise + (1 − sigma) · data
 ```
 
-so it is only defined on **[0, 1]**, and `1 − sigma` is how much *signal* is in the latent.
-`AbstractPrediction.inverse_noise_scaling` divides by it; `sample_euler_ancestral_RF` takes
-a square root through it. Their schedules start at exactly `1.0`.
+so it is only defined on **[0, 1]**, and `1 − sigma` is how much *signal* the latent holds.
+The sampler divides by it (`alpha_down`, and `AbstractPrediction.inverse_noise_scaling`).
+These schedules start at exactly `1.0`, so the margin is already near zero at the head of
+the run — the Beta 8-step schedule above has only `0.0499` of signal at index 1.
 
-Krea 2, Beta(0.6, 0.6), 20 steps, zone start `0.2` — the first modified sigma is index 4:
+That is the black rows. Start `1.06` on σ[1] = 0.9501 gives 1.0071: signal **−0.0071**,
+negative. Global `1.05` on σ[0] = 1.0 gives 1.05: signal **−0.05**.
 
-| Start factor | sigma | signal `1 − sigma` |
+Deflation cannot do this. Below 1.0 sigma falls, signal rises, and nothing can break — the
+asymmetry is structural, not a matter of taste.
+
+#### The zone slider resolves to a step index, and at 8 steps that is coarse
+
+`Zone start` is a *fraction*, converted with `int(zone × (steps))`. At 8 steps:
+
+| Zone start | index | sigma |
 | --- | --- | --- |
-| 1.00 | 0.8913 | 0.109 |
-| 1.05 | 0.9359 | 0.064 |
-| **1.10** | **0.9804** | **0.020** |
+| 0.0 **and 0.1** | 0 | 1.0000 |
+| 0.2 | 1 | 0.9501 |
+| 0.3 | 2 | 0.8434 |
+| 0.4 | 3 | 0.7011 |
 
-That is the cliff. It is not compounding — `1.05 → 0.85` and `1.10 → 0.85` accumulate
-almost identical totals. It is that at 1.10 the latent is 98% noise and 2% signal at that
-step, and the sampler then divides by that 2%.
+**Zone start 0.1 does not protect the first sigma at 8 steps — it is the same as 0.0.**
+That is why Global `1.05` at Zone `0.1` scaled σ[0] itself. The log prints the resolved
+indices on every run; read them rather than assuming.
 
-Move the zone to `0.4` (sigma 0.6696) and the same 1.10 only takes the signal from 0.330 to
-0.263 — a 20% change instead of an 82% one. That is why it read as "close to disabled".
+### Safety guard
 
-**Consequences:**
+On by default. It walks the whole schedule and pulls any sigma down until both invariants
+hold: strictly below its predecessor, and — on flow models — retaining at least half its
+original signal margin. It logs every index it touched, which is your signal that the
+settings asked for something the sampler cannot run.
 
-* **Deflation is always safe. Inflation is a cliff.** Below 1.0 sigma falls, signal rises,
-  nothing can break. The asymmetry is structural, not a matter of taste.
-* **The ceiling on the start factor is `1 / sigma` at the first modified index**, and the
-  *usable* ceiling is well below it. On Krea 2 that is `1.036` at zone start `0.1`, `1.12`
-  at `0.2`, `1.27` at `0.3`, `1.49` at `0.4`.
-* **Leave `sigmas[0]` alone.** A zone starting at `0` scales it, and on a flow model it is
-  exactly `1.0` — any factor above 1.0 makes the signal coefficient *negative*.
+Replayed against the nine settings in the table above, the guard fires on **exactly the
+five that failed** and leaves the four that worked untouched.
 
-**Clamp to schedule maximum** (on by default) enforces the ceiling: no scaled sigma may
-exceed the schedule's own maximum. It logs a warning naming how many sigmas it caught, which
-is your signal that the start factor is too high or the zone starts too early. Turning it
-off on a flow model produces mathematically undefined sigmas; it exists for epsilon models
-(SD 1.5, SDXL) where exceeding the maximum is merely unusual rather than meaningless.
+It caps strictly *below* the maximum, which matters more than it sounds: an earlier build
+capped scaled sigmas *at* `sigma_max`, and on a flow model that makes `1 − sigma` exactly
+zero — converting a wrong schedule into a guaranteed division by zero. Capping at the
+ceiling is as fatal as crossing it.
+
+Turn it off to reproduce the raw behaviour, or on epsilon models (SD 1.5, SDXL) where
+neither invariant is as sharp.
+
+### What the log tells you
+
+Every run prints the schedule before and after, the resolved zone indices, the model
+family, and — on flow models — the signal margin per sigma. A black frame, a mid-run
+composition break and "looks the same as disabled" have completely different causes that
+are all visible there and nowhere else.
+
+### Two things that are *not* the explanation
+
+* **Compounding is not what breaks these.** `1.05 → 0.85` and `1.10 → 0.85` accumulate
+  almost identical total corrections. What separates them is whether an individual sigma
+  crosses a boundary. Per-step drift still matters for *how strong* an effect is —
+  `(end/start) ^ (1 / zone_steps)`, so the same pair is weaker at higher step counts — but
+  it is not what produces a black image.
+* **Global factor is not a weak knob here.** It cancels out of a plain Euler update on an
+  epsilon model, and an earlier version of this file said so. That is false for
+  flow-matching models under ancestral sampling: `alpha = 1 − sigma` is not homogeneous in
+  sigma, so a constant factor does not cancel. Global `0.95` produces a major composition
+  shift, and gives results close to Start `0.95` / End `1.0`.
 
 ---
 

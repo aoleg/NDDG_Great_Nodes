@@ -30,6 +30,7 @@ class GreatMultiplySigmas(scripts.Script):
     enabled: bool = False
     show_preview: bool = False
     previews: dict = {}
+    is_flow: bool | None = None
 
     def title(self):
         return "Great Multiply Sigmas"
@@ -56,7 +57,7 @@ class GreatMultiplySigmas(scripts.Script):
                 curve_strength = gr.Slider(value=2.0, minimum=0.1, maximum=10.0, step=0.1, label="Curve strength", info="s_curve only; higher is a sharper transition")
 
             with gr.Row():
-                clamp_to_max = gr.Checkbox(True, label="Clamp to schedule maximum", info="required on flow models (Krea 2, Flux, SD3, Qwen), where sigma above its maximum is undefined")
+                guard = gr.Checkbox(True, label="Safety guard", info="keeps the schedule strictly decreasing, and its signal margin positive on flow models; the log names anything it changed")
                 apply_to_hr = gr.Checkbox(True, label="Apply to the Hires. fix pass")
                 show_preview = gr.Checkbox(False, label="Show preview", info="adds a before/after graph to the gallery")
 
@@ -77,14 +78,14 @@ class GreatMultiplySigmas(scripts.Script):
             (zone_end, "GMS zone end"),
             (curve_type, "GMS curve"),
             (curve_strength, "GMS curve strength"),
-            (clamp_to_max, "GMS clamp"),
+            (guard, "GMS guard"),
         ]
         self.paste_field_names = [field_name for _, field_name in self.infotext_fields if isinstance(field_name, str)]
 
-        return [enable, factor_global, start_factor, end_factor, zone_start, zone_end, curve_type, curve_strength, clamp_to_max, apply_to_hr, show_preview]
+        return [enable, factor_global, start_factor, end_factor, zone_start, zone_end, curve_type, curve_strength, guard, apply_to_hr, show_preview]
 
     @staticmethod
-    def _settings(factor_global, start_factor, end_factor, zone_start, zone_end, curve_type, curve_strength, clamp_to_max) -> dict:
+    def _settings(factor_global, start_factor, end_factor, zone_start, zone_end, curve_type, curve_strength, guard) -> dict:
         return {
             "factor_global": float(factor_global),
             "start_factor": float(start_factor),
@@ -93,17 +94,17 @@ class GreatMultiplySigmas(scripts.Script):
             "zone_end": float(zone_end),
             "curve_type": str(curve_type) if curve_type in core.CURVE_TYPES else core.LINEAR,
             "curve_strength": float(curve_strength),
-            "clamp_to_max": bool(clamp_to_max),
+            "guard": bool(guard),
         }
 
-    def process(self, p, enable, factor_global, start_factor, end_factor, zone_start, zone_end, curve_type, curve_strength, clamp_to_max, apply_to_hr, show_preview, *args):
+    def process(self, p, enable, factor_global, start_factor, end_factor, zone_start, zone_end, curve_type, curve_strength, guard, apply_to_hr, show_preview, *args):
         cls = GreatMultiplySigmas
 
         #   an interrupted run never reaches `postprocess`; start clean every time
         cls.previews = {}
         cls.show_preview = bool(show_preview)
 
-        settings = self._settings(factor_global, start_factor, end_factor, zone_start, zone_end, curve_type, curve_strength, clamp_to_max)
+        settings = self._settings(factor_global, start_factor, end_factor, zone_start, zone_end, curve_type, curve_strength, guard)
         cls.enabled = bool(enable) and not core.is_identity(settings["factor_global"], settings["start_factor"], settings["end_factor"])
         if not cls.enabled:
             return
@@ -117,11 +118,11 @@ class GreatMultiplySigmas(scripts.Script):
                 "GMS zone end": settings["zone_end"],
                 "GMS curve": settings["curve_type"],
                 "GMS curve strength": settings["curve_strength"],
-                "GMS clamp": settings["clamp_to_max"],
+                "GMS guard": settings["guard"],
             }
         )
 
-    def process_before_every_sampling(self, p, enable, factor_global, start_factor, end_factor, zone_start, zone_end, curve_type, curve_strength, clamp_to_max, apply_to_hr, show_preview, *args, **kwargs):
+    def process_before_every_sampling(self, p, enable, factor_global, start_factor, end_factor, zone_start, zone_end, curve_type, curve_strength, guard, apply_to_hr, show_preview, *args, **kwargs):
         cls = GreatMultiplySigmas
         if not cls.enabled:
             return
@@ -137,25 +138,23 @@ class GreatMultiplySigmas(scripts.Script):
         if getattr(original, "_gms_wrapped", False):
             return
 
-        settings = self._settings(factor_global, start_factor, end_factor, zone_start, zone_end, curve_type, curve_strength, clamp_to_max)
+        settings = self._settings(factor_global, start_factor, end_factor, zone_start, zone_end, curve_type, curve_strength, guard)
         label = "Hires. fix pass" if getattr(p, "is_hr_pass", False) else "First pass"
+        cls.is_flow = self._is_flow_model(p)
 
         def get_sigmas(processing, steps):
             before = original(processing, steps)
             if not isinstance(before, torch.Tensor) or before.dim() != 1 or before.numel() == 0:
                 return before
 
-            after, start_idx, end_idx, clamped = core.multiply_sigmas(before, **settings)
-            logger.info(f"[GMS] {label}: {len(before)} sigmas, zone [{start_idx}, {end_idx}], {before[0].item():.4f}->{after[0].item():.4f} .. {before[-2].item():.4f}->{after[-2].item():.4f}")
-            #   a clamp means the settings asked for a sigma the model has no definition
-            #   for; say so rather than silently delivering a different schedule
-            if clamped:
-                logger.warning(f"[GMS] {label}: {clamped} sigma(s) were clamped to the schedule maximum {float(before.max()):.4f} - lower the start factor or move the zone later")
+            report = core.multiply_sigmas(before, is_flow=cls.is_flow, **settings)
+            after = report.sigmas
+            cls._report(label, before, report)
 
             #   one graph per pass, not one per image: the schedule is identical across a
             #   batch, and a 4-image run would otherwise append four copies of it
             if cls.show_preview and label not in cls.previews:
-                image = core.comparison_graph(before, after, start_idx, end_idx, title=f"Great Multiply Sigmas - {label}")
+                image = core.comparison_graph(before, after, report.zone[0], report.zone[1], title=f"Great Multiply Sigmas - {label}")
                 if image is None:
                     logger.warning("[GMS] preview requested but matplotlib is unavailable")
                     cls.show_preview = False
@@ -169,6 +168,47 @@ class GreatMultiplySigmas(scripts.Script):
         #   inside `sample()` / `sample_img2img()` finds this instead
         sampler.get_sigmas = get_sigmas
 
+    @staticmethod
+    def _is_flow_model(p) -> bool | None:
+        """`True` when sigma is a mixing coefficient rather than a noise scale.
+
+        `PredictionDiscreteFlow` / `PredictionFlux` both report `prediction_type == "const"`
+        (`backend/modules/k_prediction.py`).  Returns `None` if the predictor cannot be
+        reached, which leaves `multiply_sigmas` to infer it from the schedule instead.
+        """
+
+        try:
+            return p.sd_model.forge_objects.unet.model.predictor.prediction_type == "const"
+        except Exception:
+            return None
+
+    @classmethod
+    def _report(cls, label: str, before: torch.Tensor, report):
+        """Log the actual schedule.
+
+        Reading the effect off the image is guesswork — a black frame, a mid-run
+        composition break and "looks the same as disabled" have different causes that are
+        all visible here and nowhere else.
+        """
+
+        start_idx, end_idx = report.zone
+        kind = "flow (sigma is a mixing coefficient)" if report.is_flow else "epsilon"
+        logger.info(f"[GMS] {label}: {len(before)} sigmas, {kind}, zone indices [{start_idx}, {end_idx}]")
+        logger.info("[GMS]   before: " + " ".join(f"{v:.4f}" for v in before.tolist()))
+        logger.info("[GMS]   after:  " + " ".join(f"{v:.4f}" for v in report.sigmas.tolist()))
+
+        if report.is_flow:
+            logger.info(f"[GMS]   signal: " + " ".join(f"{1.0 - v:.4f}" for v in report.sigmas.tolist()))
+            logger.info(f"[GMS]   smallest signal margin {report.min_signal:.4f} at index {report.min_signal_index}")
+
+        if report.guarded:
+            logger.warning(f"[GMS] {label}: the safety guard pulled down {len(report.guarded)} sigma(s) at indices {report.guarded} - the settings asked for a schedule the sampler cannot run")
+
+        if report.backward:
+            logger.error(f"[GMS] {label}: the schedule steps BACKWARDS at indices {report.backward} - expect a broken or black image. Lower the start factor, or move the zone later")
+        elif report.is_flow and report.min_signal < 0.02:
+            logger.warning(f"[GMS] {label}: signal margin {report.min_signal:.4f} is very close to zero; the sampler divides by it")
+
     def postprocess(self, p, processed, *args):
         cls = GreatMultiplySigmas
 
@@ -178,3 +218,4 @@ class GreatMultiplySigmas(scripts.Script):
         cls.enabled = False
         cls.show_preview = False
         cls.previews = {}
+        cls.is_flow = None

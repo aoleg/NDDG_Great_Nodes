@@ -1,10 +1,29 @@
 """Zone-limited, curve-interpolated sigma multiplication.
 
 The maths of the Great Multiply Sigmas node, with no framework imports: it takes a 1D
-tensor of sigmas and returns a new one plus the zone it touched.
+tensor of sigmas and returns a new one, the zone it touched, and a report of anything about
+the result a sampler will not survive.
+
+Two invariants a scaled schedule has to keep, both learned the hard way:
+
+*   **Strictly decreasing.**  A scaled sigma that lands at or above its predecessor makes
+    the sampler step backwards.  In `sample_euler_ancestral_RF` that puts a negative number
+    under the square root of `renoise_coeff`, which is a NaN, which is a black image.
+
+*   **A positive signal margin, on flow-matching models.**  For a `const` predictor sigma
+    is the mixing coefficient of `x = sigma * noise + (1 - sigma) * data`, so `1 - sigma` is
+    how much signal the latent holds — and the sampler divides by it (`alpha_down`, and
+    `AbstractPrediction.inverse_noise_scaling`).  Their schedules start at exactly 1.0, so
+    the margin at the head of the run is *already* near zero before any scaling.
+
+An earlier version of this file capped scaled sigmas at the schedule's own maximum, which
+looked like it addressed the second point and did not: capping to exactly `sigma_max` on a
+flow model produces `1 - sigma == 0` and a division by zero, turning a merely-wrong
+schedule into a guaranteed NaN.  The ceiling has to sit strictly below.
 """
 
 import math
+from dataclasses import dataclass, field
 
 import torch
 
@@ -18,12 +37,53 @@ CURVE_TYPES = [LINEAR, S_CURVE]
 MIN_FACTOR = 0.70
 MAX_FACTOR = 1.30
 
-#   A constant factor cancels out of the sampler's update entirely — the step it takes
-#   through latent space is unchanged, and all that is left is the model being told a noise
-#   level the latent does not carry, plus the initial-noise magnitude if the zone reaches
-#   sigma[0].  It is the weak knob and does not need fine resolution.
+#   Wider, because a constant factor is a different and blunter effect than a ramp — but
+#   not weaker.  It cancels out of a plain Euler update on an epsilon model; it does *not*
+#   cancel on a flow model under ancestral sampling, where the `1 - sigma` terms are not
+#   homogeneous in sigma.
 MIN_GLOBAL = 0.50
 MAX_GLOBAL = 2.00
+
+#   The guard keeps at least this fraction of each sigma's original signal margin
+#   `1 - sigma`.  0.5 is a judgement call: it leaves the effect room to be felt while
+#   staying clear of the division.
+MIN_SIGNAL_FRACTION = 0.5
+
+#   ...and each sigma at least this far below its predecessor, so "strictly decreasing"
+#   survives float rounding.
+MIN_STEP_RATIO = 1e-3
+
+#   A schedule that tops out at 1.0 came from a flow-matching predictor.  Epsilon models
+#   (SD 1.5, SDXL) run to roughly 14.6, so there is no ambiguity in practice — but the
+#   caller can say so explicitly rather than relying on this.
+FLOW_SIGMA_MAX = 1.0 + 1e-6
+
+
+@dataclass
+class Report:
+    """What the scaling did, and anything about the result worth refusing or warning on."""
+
+    sigmas: torch.Tensor
+    zone: tuple[int, int]
+    is_flow: bool
+    guarded: list[int] = field(default_factory=list)
+    """indices the safety guard had to pull down"""
+    backward: list[int] = field(default_factory=list)
+    """indices i where sigma[i+1] >= sigma[i] — the sampler would step backwards"""
+    min_signal: float = 1.0
+    """smallest `1 - sigma` over indices 1..n-1; only meaningful when `is_flow`.
+
+    Index 0 is excluded on purpose, and not as a convenience: `sample_euler_ancestral_RF`
+    forms its `alpha_ip1 = 1 - sigmas[i + 1]` and divides by the `alpha_down` derived from
+    it, so only sigmas from index 1 up ever become that divisor.  A flow schedule natively
+    starts at `sigma[0] == 1.0`, i.e. a margin of exactly zero, and runs perfectly well —
+    counting it would flag every schedule ever produced.
+    """
+    min_signal_index: int = 0
+
+    @property
+    def unsafe(self) -> bool:
+        return bool(self.backward) or (self.is_flow and self.min_signal <= 0.0)
 
 
 def interpolate_curve(t: float, curve_type: str, strength: float) -> float:
@@ -64,27 +124,30 @@ def multiply_sigmas(
     zone_start: float = 0.0,
     zone_end: float = 1.0,
     curve_strength: float = 2.0,
-    clamp_to_max: bool = True,
-) -> tuple[torch.Tensor, int, int, int]:
-    """Return `(new_sigmas, zone_start_index, zone_end_index, clamped_count)`.
+    guard: bool = True,
+    is_flow: bool | None = None,
+) -> Report:
+    """Scale `sigmas` inside the zone and report on the result.
 
     Sigmas outside `[zone_start_index, zone_end_index]` are left exactly as they were.
 
-    `clamp_to_max` caps every scaled sigma at the schedule's own maximum.  On epsilon
-    models that only avoids a schedule that starts above where the sampler thinks it
-    starts.  On flow-matching models (Krea 2, Flux, SD3, Qwen — anything whose predictor
-    reports `prediction_type == "const"`) it is load-bearing: sigma there is not a noise
-    *scale* but the mixing coefficient of `x = sigma * noise + (1 - sigma) * data`, so it
-    is only defined on [0, 1].  Their schedules start at exactly 1.0, and any factor above
-    1.0 near the head of the run drives the data coefficient `1 - sigma` to zero or
-    negative — which `AbstractPrediction.inverse_noise_scaling` then divides by, and which
-    `sample_euler_ancestral_RF` takes a square root through.  Deflation is always safe;
-    inflation is the cliff, and this is where it stops.
+    `guard` enforces the two invariants in the module docstring: strictly decreasing, and
+    (on flow models) at least `MIN_SIGNAL_FRACTION` of each sigma's original `1 - sigma`
+    margin.  It walks the whole schedule, not just the zone — the damage a zone edit does
+    is usually at its *edge*, where a scaled sigma meets an untouched neighbour.
+
+    `is_flow` says whether sigma is a mixing coefficient rather than a noise scale.  Pass
+    it from `predictor.prediction_type == "const"`; leaving it `None` infers it from the
+    schedule's maximum, which is 1.0 for every flow model and ~14.6 for epsilon ones.
     """
 
     total = len(sigmas)
     if total == 0:
-        return sigmas, 0, 0, 0
+        return Report(sigmas=sigmas, zone=(0, 0), is_flow=False)
+
+    ceiling_max = float(sigmas.max())
+    if is_flow is None:
+        is_flow = ceiling_max <= FLOW_SIGMA_MAX
 
     result = sigmas.clone()
     start_idx, end_idx = zone_indices(total, zone_start, zone_end)
@@ -96,15 +159,34 @@ def multiply_sigmas(
         local_factor = start_factor + (end_factor - start_factor) * curve_value
         result[i] *= factor_global * local_factor
 
-    clamped = 0
-    if clamp_to_max:
-        ceiling = float(sigmas.max())
-        over = result > ceiling
-        clamped = int(over.sum())
-        if clamped:
-            result[over] = ceiling
+    report = Report(sigmas=result, zone=(start_idx, end_idx), is_flow=is_flow)
 
-    return result, start_idx, end_idx, clamped
+    if guard:
+        for i in range(total):
+            if float(sigmas[i]) <= 0.0:
+                continue  # the terminal zero stays zero
+            ceiling = ceiling_max
+            if is_flow:
+                #   strictly below 1.0: capping *at* the maximum is what makes
+                #   `1 - sigma` zero, and the sampler divides by that
+                ceiling = min(ceiling, 1.0 - MIN_SIGNAL_FRACTION * (1.0 - float(sigmas[i])))
+            if i > 0:
+                ceiling = min(ceiling, float(result[i - 1]) * (1.0 - MIN_STEP_RATIO))
+            if float(result[i]) > ceiling:
+                result[i] = ceiling
+                report.guarded.append(i)
+
+    for i in range(total - 1):
+        if float(result[i + 1]) >= float(result[i]):
+            report.backward.append(i)
+
+    if is_flow and total > 1:
+        signal = 1.0 - result[1:]
+        offset = int(torch.argmin(signal))
+        report.min_signal_index = offset + 1
+        report.min_signal = float(signal[offset])
+
+    return report
 
 
 def is_identity(factor_global: float, start_factor: float, end_factor: float) -> bool:
