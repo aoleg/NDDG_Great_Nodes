@@ -44,6 +44,10 @@ MAX_FACTOR = 1.30
 MIN_GLOBAL = 0.50
 MAX_GLOBAL = 2.00
 
+#   `Skip first N sigmas` covers any realistic step count worth protecting; the head of
+#   the schedule is where all the hazard is, and nobody needs to skip past step 20.
+MAX_SKIP_FIRST = 20
+
 #   The guard keeps at least this fraction of each sigma's original signal margin
 #   `1 - sigma`.  0.5 is a judgement call: it leaves the effect room to be felt while
 #   staying clear of the division.
@@ -103,6 +107,12 @@ class Report:
     def unsafe(self) -> bool:
         return bool(self.backward) or (self.is_flow and self.min_signal <= 0.0)
 
+    @property
+    def empty(self) -> bool:
+        """`Skip first N` swallowed the whole zone, so nothing was scaled."""
+
+        return self.zone[0] > self.zone[1]
+
 
 def interpolate_curve(t: float, curve_type: str, strength: float) -> float:
     """Position `t` in [0, 1] -> blend weight between the start and end factor."""
@@ -138,11 +148,20 @@ def _ceiling(sigmas: torch.Tensor, index: int, previous: float | None, sigma_max
     return ceiling
 
 
-def zone_indices(total: int, zone_start: float, zone_end: float) -> tuple[int, int]:
+def zone_indices(total: int, zone_start: float, zone_end: float, skip_first: int = 0) -> tuple[int, int]:
+    """Resolve the zone fractions to sigma indices, with `skip_first` as a hard floor.
+
+    The fractions are coarse at low step counts — `int(zone * (total - 1))` maps both 0.0
+    and 0.1 to index 0 on an 8-step run — which makes "leave the first sigma alone"
+    inexpressible exactly when it matters most.  `skip_first` says it directly.
+    """
+
     start = int(zone_start * (total - 1))
     end = int(zone_end * (total - 1))
     if end < start:
         start, end = end, start
+    if skip_first > 0:
+        start = max(start, min(int(skip_first), total - 1))
     return start, end
 
 
@@ -155,6 +174,7 @@ def multiply_sigmas(
     zone_start: float = 0.0,
     zone_end: float = 1.0,
     curve_strength: float = 2.0,
+    skip_first: int = 0,
     guard: bool = True,
     is_flow: bool | None = None,
 ) -> Report:
@@ -181,7 +201,7 @@ def multiply_sigmas(
         is_flow = ceiling_max <= FLOW_SIGMA_MAX
 
     result = sigmas.clone()
-    start_idx, end_idx = zone_indices(total, zone_start, zone_end)
+    start_idx, end_idx = zone_indices(total, zone_start, zone_end, skip_first)
     zone_length = end_idx - start_idx
 
     for i in range(start_idx, end_idx + 1):

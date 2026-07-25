@@ -215,11 +215,13 @@ section after the table before moving anything.
 | Start factor | 0.70 – 1.30, step 0.001 | `1` | The factor at the beginning of the zone. **Above 1.0 this is the dangerous one** |
 | End factor | 0.70 – 1.30, step 0.001 | `1` | The factor at the end of the zone. Far more forgiving |
 | Zone start / Zone end | 0 – 1, step 0.01 | `0` / `1` | Fraction of the schedule to touch; sigmas outside are left exactly as they were |
+| Skip first N sigmas | 0 – 20, step 1 | `0` | A hard floor on the zone, in **steps** rather than fractions. Never lowers the zone, only raises it |
 | Curve | — | `linear` | How the start factor is interpolated into the end factor |
 | Curve strength | 0.1 – 10 | `2` | `s_curve` only — higher is a sharper transition |
 | Safety guard | — | on | Keeps the schedule strictly decreasing, and its signal margin positive on flow models |
 | Apply to the Hires. fix pass | — | on | Whether the second pass is scaled too |
 | Show preview | — | off | Adds a before/after graph of the schedule to the gallery |
+| Debugging | — | off | Prints the schedule, resolved zone, signal margins and headroom to the console. **Nothing is logged without it** |
 
 All three factors at `1` is a no-op and the schedule is left untouched.
 
@@ -353,6 +355,16 @@ this happens. The fix is to move the zone later, never to push the factor higher
 which is why Global `1.05` there scaled σ[0] itself. The log prints the resolved indices on
 every run; read them rather than assuming.
 
+#### Skip first N sigmas
+
+This is the fix for the coarseness above. It is a floor on the zone expressed in steps, so
+`Skip first N = 1` means "never touch sigma[0]" at any step count, which no zone fraction can
+say on an 8-step run. It only ever raises the zone start — a `Zone start` that already lands
+later wins — and if it skips past `Zone end`, nothing is scaled and the log says so.
+
+Setting it to `1` is the cheapest protection available on a flow model: sigma[0] is exactly
+1.0 there, so any factor above 1.0 applied to it makes the signal coefficient negative.
+
 ### Nothing here transfers
 
 Schedules are dominated by the checkpoint's `shift`, not by the scheduler. Two attempts to
@@ -381,7 +393,8 @@ ceiling is as fatal as crossing it.
 
 ### What the log tells you
 
-Every run prints the schedule before and after, the resolved zone indices, the model
+**Tick *Debugging* first — the extension prints nothing at all without it.** With it on,
+every run prints the schedule before and after, the resolved zone indices, the model
 family, the per-sigma signal margin, and the headroom. A black frame, a mid-run composition
 break and "looks the same as disabled" have completely different causes, all visible there
 and nowhere else.

@@ -345,6 +345,43 @@ for name, kw in (
     invariants(report, name)
 
 
+# ---- Skip first N sigmas: a floor on the zone, expressed in steps ---------------------
+
+#   the whole point: at 8 steps the fraction cannot express "leave index 0 alone"
+check(sigma_core.zone_indices(9, 0.1, 1.0) == (0, 8), "zone 0.1 no longer resolves to index 0 at 8 steps")
+check(sigma_core.zone_indices(9, 0.1, 1.0, skip_first=1) == (1, 8), "skip_first=1 did not lift the zone off index 0")
+check(sigma_core.zone_indices(9, 0.0, 1.0, skip_first=3) == (3, 8), "skip_first=3 did not apply")
+
+#   it is a floor, never a move: a later zone start wins
+check(sigma_core.zone_indices(9, 0.5, 1.0, skip_first=1) == (4, 8), "skip_first pulled a later zone earlier")
+check(sigma_core.zone_indices(9, 0.5, 1.0, skip_first=0) == (4, 8), "skip_first=0 changed the zone")
+
+#   and it is clamped, so an over-long skip cannot index off the end
+check(sigma_core.zone_indices(9, 0.0, 1.0, skip_first=99)[0] == 8, "an over-long skip was not clamped")
+
+#   scaling honours it: everything below the floor is untouched
+r = scaled(live, factor_global=0.5, zone_start=0.0, zone_end=1.0, skip_first=2)
+check(r.zone == (2, 8), f"skip_first zone was {r.zone}")
+check(torch.equal(r.sigmas[:2], live[:2]), "skipped sigmas were modified")
+check(torch.allclose(r.sigmas[2:], live[2:] * 0.5), "sigmas above the floor were not scaled")
+
+#   skipping past the zone end scales nothing at all, and says so
+empty = scaled(live, factor_global=0.5, zone_start=0.0, zone_end=0.2, skip_first=6)
+check(empty.empty, "a skip past the zone end was not reported as empty")
+check(torch.equal(empty.sigmas, live), "an empty zone still modified the schedule")
+check(not scaled(live, factor_global=0.5).empty, "a normal zone was reported as empty")
+
+#   it is the direct fix for the setting that went black: Global 1.05 at zone 0.1 scaled
+#   sigma[0] itself, and skip_first=1 makes that inexpressible
+black = scaled(live, factor_global=1.05, zone_start=0.1, zone_end=1.0)
+check(float(black.sigmas[0]) > 1.0, "the zone 0.1 case no longer scales sigma[0]")
+skipped = scaled(live, factor_global=1.05, zone_start=0.1, zone_end=1.0, skip_first=1)
+check(float(skipped.sigmas[0]) == 1.0, "skip_first=1 did not protect sigma[0]")
+
+#   headroom is reported at the post-skip index, which is the whole point of having it
+check(abs(guarded(live, zone_start=0.0, zone_end=1.0, skip_first=2).headroom - guarded(live, zone_start=0.3, zone_end=1.0).headroom) < 1e-9,
+      "headroom was not recomputed at the skipped index")
+
 graph = sigma_core.comparison_graph(schedule, schedule * 0.8, 2, 6)
 check(graph is not None and graph.size[0] > 100, "comparison_graph did not render")
 
@@ -636,7 +673,7 @@ GMS = gms.GreatMultiplySigmas
 sigma_script = GMS()
 
 returned = sigma_script.ui(False)
-gms_args = [True, 1.0, 1.0, 2.0, 0.0, 1.0, "linear", 2.0, False, True, False]
+gms_args = [True, 1.0, 1.0, 2.0, 0.0, 1.0, 0, "linear", 2.0, False, True, False, True]
 check(len(returned) == len(gms_args), f"GMS ui() returns {len(returned)}, hooks unpack {len(gms_args)}")
 
 
@@ -649,8 +686,8 @@ class FakeSampler:
         return torch.linspace(14.6, 0.0, steps + 1)
 
 
-def gms_ui(enable=True, factor_global=1.0, start_factor=1.0, end_factor=2.0, zone_start=0.0, zone_end=1.0, curve="linear", curve_strength=2.0, guard=False, apply_to_hr=True, preview=False):
-    return [enable, factor_global, start_factor, end_factor, zone_start, zone_end, curve, curve_strength, guard, apply_to_hr, preview]
+def gms_ui(enable=True, factor_global=1.0, start_factor=1.0, end_factor=2.0, zone_start=0.0, zone_end=1.0, skip_first=0, curve="linear", curve_strength=2.0, guard=False, apply_to_hr=True, preview=False, debug=True):
+    return [enable, factor_global, start_factor, end_factor, zone_start, zone_end, skip_first, curve, curve_strength, guard, apply_to_hr, preview, debug]
 
 
 # identity settings must not wrap at all
@@ -765,6 +802,50 @@ p.sampler = FakeSampler()
 sigma_script.process(p, *gms_ui(start_factor=1.3, end_factor=1.3, guard=False))
 sigma_script.process_before_every_sampling(p, *gms_ui(start_factor=1.3, end_factor=1.3, guard=False))
 check(float(p.sampler.get_sigmas(p, 8).max()) > 14.6, "disabling the guard did not let the schedule inflate")
+
+# nothing reaches the console unless Debugging is on
+LOGGER.lines.clear()
+p = FakeP()
+p.sampler = FakeSampler()
+sigma_script.process(p, *gms_ui(start_factor=1.3, end_factor=1.3, guard=True, debug=False))
+sigma_script.process_before_every_sampling(p, *gms_ui(start_factor=1.3, end_factor=1.3, guard=True, debug=False))
+p.sampler.get_sigmas(p, 8)
+check(LOGGER.lines == [], f"Debugging was off but {len(LOGGER.lines)} line(s) were logged: {LOGGER.lines[:2]}")
+check(GMS.debug is False, "the debug flag was not cleared")
+
+# ...including the two that are not part of the schedule dump
+LOGGER.lines.clear()
+p = FakeP()
+p.sampler = object()
+sigma_script.process(p, *gms_ui(debug=False))
+sigma_script.process_before_every_sampling(p, *gms_ui(debug=False))
+check(LOGGER.lines == [], "the missing-get_sigmas warning was logged with Debugging off")
+p = FakeP()
+p.sampler = object()
+sigma_script.process(p, *gms_ui(debug=True))
+sigma_script.process_before_every_sampling(p, *gms_ui(debug=True))
+check(any(kind == "warning" for kind, _ in LOGGER.lines), "the missing-get_sigmas warning was suppressed with Debugging on")
+
+# the skip reaches the wrapper, and an empty zone is reported rather than silently ignored
+LOGGER.lines.clear()
+p = FakeP()
+p.sampler = FakeSampler()
+sigma_script.process(p, *gms_ui(factor_global=0.5, skip_first=3, guard=True, debug=True))
+sigma_script.process_before_every_sampling(p, *gms_ui(factor_global=0.5, skip_first=3, guard=True, debug=True))
+result = p.sampler.get_sigmas(p, 8)
+baseline = FakeSampler().get_sigmas(p, 8)
+check(torch.equal(result[:3], baseline[:3]), "the wrapper scaled sigmas below the skip floor")
+check(not torch.equal(result[3:], baseline[3:]), "the wrapper did not scale above the skip floor")
+check(any("zone indices [3," in line for _, line in LOGGER.lines), f"the skipped zone was not logged: {[l for _, l in LOGGER.lines][:3]}")
+check(p.extra_generation_params["GMS skip first"] == 3, "the skip is missing from the infotext")
+
+LOGGER.lines.clear()
+p = FakeP()
+p.sampler = FakeSampler()
+sigma_script.process(p, *gms_ui(factor_global=0.5, zone_end=0.2, skip_first=6, guard=True, debug=True))
+sigma_script.process_before_every_sampling(p, *gms_ui(factor_global=0.5, zone_end=0.2, skip_first=6, guard=True, debug=True))
+check(torch.equal(p.sampler.get_sigmas(p, 8), FakeSampler().get_sigmas(p, 8)), "an empty zone still changed the schedule")
+check(any("no sigmas inside the zone" in line for _, line in LOGGER.lines), "an empty zone was not reported")
 
 # a non-tensor schedule passes straight through
 p = FakeP()

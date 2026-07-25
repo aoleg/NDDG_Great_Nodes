@@ -31,6 +31,7 @@ class GreatMultiplySigmas(scripts.Script):
     show_preview: bool = False
     previews: dict = {}
     is_flow: bool | None = None
+    debug: bool = False
 
     def title(self):
         return "Great Multiply Sigmas"
@@ -52,21 +53,26 @@ class GreatMultiplySigmas(scripts.Script):
                 zone_start = gr.Slider(value=0.0, minimum=0.0, maximum=1.0, step=0.01, label="Zone start", info="fraction of the schedule; sigmas outside the zone are untouched")
                 zone_end = gr.Slider(value=1.0, minimum=0.0, maximum=1.0, step=0.01, label="Zone end")
 
+            skip_first = gr.Slider(value=0, minimum=0, maximum=core.MAX_SKIP_FIRST, step=1, label="Skip first N sigmas", info="a hard floor on the zone, in steps rather than fractions; at low step counts the fraction cannot express this (Zone 0.1 is index 0 on an 8-step run)")
+
             with gr.Row():
                 curve_type = gr.Dropdown(value=core.LINEAR, choices=core.CURVE_TYPES, label="Curve", info="how the start factor is interpolated into the end factor")
                 curve_strength = gr.Slider(value=2.0, minimum=0.1, maximum=10.0, step=0.1, label="Curve strength", info="s_curve only; higher is a sharper transition")
 
             with gr.Row():
-                guard = gr.Checkbox(True, label="Safety guard", info="keeps the schedule strictly decreasing, and its signal margin positive on flow models; the log names anything it changed")
+                guard = gr.Checkbox(True, label="Safety guard", info="keeps the schedule strictly decreasing, and its signal margin positive on flow models")
                 apply_to_hr = gr.Checkbox(True, label="Apply to the Hires. fix pass")
+
+            with gr.Row():
                 show_preview = gr.Checkbox(False, label="Show preview", info="adds a before/after graph to the gallery")
+                debug = gr.Checkbox(False, label="Debugging", info="prints the schedule, the resolved zone, the signal margins and the headroom to the console; nothing is logged without it")
 
         #   `ui_loadsave` caches a slider's `minimum`/`maximum`/`step` in `ui-config.json`
         #   and re-applies them on every start, so a recalibration is invisible to anyone
         #   who ever ran an older build — and a value saved outside the new range comes
         #   back regardless of it.  These controls' bounds are the extension's to define,
         #   so they opt out; their values still round-trip through the infotext below.
-        for component in (factor_global, start_factor, end_factor, zone_start, zone_end, curve_type, curve_strength):
+        for component in (factor_global, start_factor, end_factor, zone_start, zone_end, skip_first, curve_type, curve_strength):
             component.do_not_save_to_config = True
 
         self.infotext_fields = [
@@ -76,35 +82,39 @@ class GreatMultiplySigmas(scripts.Script):
             (end_factor, "GMS end factor"),
             (zone_start, "GMS zone start"),
             (zone_end, "GMS zone end"),
+            (skip_first, "GMS skip first"),
             (curve_type, "GMS curve"),
             (curve_strength, "GMS curve strength"),
             (guard, "GMS guard"),
         ]
         self.paste_field_names = [field_name for _, field_name in self.infotext_fields if isinstance(field_name, str)]
 
-        return [enable, factor_global, start_factor, end_factor, zone_start, zone_end, curve_type, curve_strength, guard, apply_to_hr, show_preview]
+        return [enable, factor_global, start_factor, end_factor, zone_start, zone_end, skip_first, curve_type, curve_strength, guard, apply_to_hr, show_preview, debug]
 
     @staticmethod
-    def _settings(factor_global, start_factor, end_factor, zone_start, zone_end, curve_type, curve_strength, guard) -> dict:
+    def _settings(factor_global, start_factor, end_factor, zone_start, zone_end, skip_first, curve_type, curve_strength, guard) -> dict:
         return {
             "factor_global": float(factor_global),
             "start_factor": float(start_factor),
             "end_factor": float(end_factor),
             "zone_start": float(zone_start),
             "zone_end": float(zone_end),
+            "skip_first": int(skip_first),
             "curve_type": str(curve_type) if curve_type in core.CURVE_TYPES else core.LINEAR,
             "curve_strength": float(curve_strength),
             "guard": bool(guard),
         }
 
-    def process(self, p, enable, factor_global, start_factor, end_factor, zone_start, zone_end, curve_type, curve_strength, guard, apply_to_hr, show_preview, *args):
+    def process(self, p, enable, factor_global, start_factor, end_factor, zone_start, zone_end, skip_first, curve_type, curve_strength, guard, apply_to_hr, show_preview, debug, *args):
         cls = GreatMultiplySigmas
 
         #   an interrupted run never reaches `postprocess`; start clean every time
         cls.previews = {}
         cls.show_preview = bool(show_preview)
+        #   set before the early return below: `process_before_every_sampling` logs too
+        cls.debug = bool(debug)
 
-        settings = self._settings(factor_global, start_factor, end_factor, zone_start, zone_end, curve_type, curve_strength, guard)
+        settings = self._settings(factor_global, start_factor, end_factor, zone_start, zone_end, skip_first, curve_type, curve_strength, guard)
         cls.enabled = bool(enable) and not core.is_identity(settings["factor_global"], settings["start_factor"], settings["end_factor"])
         if not cls.enabled:
             return
@@ -116,13 +126,14 @@ class GreatMultiplySigmas(scripts.Script):
                 "GMS end factor": settings["end_factor"],
                 "GMS zone start": settings["zone_start"],
                 "GMS zone end": settings["zone_end"],
+                "GMS skip first": settings["skip_first"],
                 "GMS curve": settings["curve_type"],
                 "GMS curve strength": settings["curve_strength"],
                 "GMS guard": settings["guard"],
             }
         )
 
-    def process_before_every_sampling(self, p, enable, factor_global, start_factor, end_factor, zone_start, zone_end, curve_type, curve_strength, guard, apply_to_hr, show_preview, *args, **kwargs):
+    def process_before_every_sampling(self, p, enable, factor_global, start_factor, end_factor, zone_start, zone_end, skip_first, curve_type, curve_strength, guard, apply_to_hr, show_preview, debug, *args, **kwargs):
         cls = GreatMultiplySigmas
         if not cls.enabled:
             return
@@ -133,12 +144,12 @@ class GreatMultiplySigmas(scripts.Script):
         sampler = getattr(p, "sampler", None)
         original = getattr(sampler, "get_sigmas", None)
         if sampler is None or not callable(original):
-            logger.warning("[GMS] this sampler has no get_sigmas; the schedule was left alone")
+            cls._log("warning", "this sampler has no get_sigmas; the schedule was left alone")
             return
         if getattr(original, "_gms_wrapped", False):
             return
 
-        settings = self._settings(factor_global, start_factor, end_factor, zone_start, zone_end, curve_type, curve_strength, guard)
+        settings = self._settings(factor_global, start_factor, end_factor, zone_start, zone_end, skip_first, curve_type, curve_strength, guard)
         label = "Hires. fix pass" if getattr(p, "is_hr_pass", False) else "First pass"
         cls.is_flow = self._is_flow_model(p)
 
@@ -156,7 +167,7 @@ class GreatMultiplySigmas(scripts.Script):
             if cls.show_preview and label not in cls.previews:
                 image = core.comparison_graph(before, after, report.zone[0], report.zone[1], title=f"Great Multiply Sigmas - {label}")
                 if image is None:
-                    logger.warning("[GMS] preview requested but matplotlib is unavailable")
+                    cls._log("warning", "preview requested but matplotlib is unavailable")
                     cls.show_preview = False
                 else:
                     cls.previews[label] = image
@@ -183,6 +194,18 @@ class GreatMultiplySigmas(scripts.Script):
             return None
 
     @classmethod
+    def _log(cls, level: str, message: str):
+        """Every line this extension prints goes through here, and only with Debugging on.
+
+        The schedule dump is five or more lines per generation, which is noise for anyone
+        who is not actively calibrating — and calibrating is exactly when it is worth
+        having.  Nothing is printed unless the user asked for it.
+        """
+
+        if cls.debug:
+            getattr(logger, level)(f"[GMS] {message}")
+
+    @classmethod
     def _report(cls, label: str, before: torch.Tensor, report):
         """Log the actual schedule.
 
@@ -191,30 +214,38 @@ class GreatMultiplySigmas(scripts.Script):
         all visible here and nowhere else.
         """
 
+        if not cls.debug:
+            return
+
         start_idx, end_idx = report.zone
         kind = "flow (sigma is a mixing coefficient)" if report.is_flow else "epsilon"
-        logger.info(f"[GMS] {label}: {len(before)} sigmas, {kind}, zone indices [{start_idx}, {end_idx}]")
-        logger.info("[GMS]   before: " + " ".join(f"{v:.4f}" for v in before.tolist()))
-        logger.info("[GMS]   after:  " + " ".join(f"{v:.4f}" for v in report.sigmas.tolist()))
+        cls._log("info", f"{label}: {len(before)} sigmas, {kind}, zone indices [{start_idx}, {end_idx}]")
+
+        if report.empty:
+            cls._log("warning", f"{label}: 'Skip first N sigmas' left no sigmas inside the zone - nothing was scaled")
+            return
+
+        cls._log("info", "  before: " + " ".join(f"{v:.4f}" for v in before.tolist()))
+        cls._log("info", "  after:  " + " ".join(f"{v:.4f}" for v in report.sigmas.tolist()))
 
         if report.is_flow:
-            logger.info(f"[GMS]   signal: " + " ".join(f"{1.0 - v:.4f}" for v in report.sigmas.tolist()))
-            logger.info(f"[GMS]   smallest signal margin {report.min_signal:.4f} at index {report.min_signal_index}")
+            cls._log("info", "  signal: " + " ".join(f"{1.0 - v:.4f}" for v in report.sigmas.tolist()))
+            cls._log("info", f"  smallest signal margin {report.min_signal:.4f} at index {report.min_signal_index}")
 
         #   the actionable number: what the zone's first sigma will actually tolerate
         if report.headroom is not None:
-            logger.info(f"[GMS]   headroom: Global x Start up to {report.headroom:.4f} passes unguarded at zone index {start_idx}; move the zone later for more")
+            cls._log("info", f"  headroom: Global x Start up to {report.headroom:.4f} passes unguarded at zone index {start_idx}; move the zone later for more")
 
         if report.guarded:
-            logger.warning(f"[GMS] {label}: the safety guard pulled down {len(report.guarded)} sigma(s) at indices {report.guarded} - the settings asked for a schedule the sampler cannot run")
+            cls._log("warning", f"{label}: the safety guard pulled down {len(report.guarded)} sigma(s) at indices {report.guarded} - the settings asked for a schedule the sampler cannot run")
 
         if report.saturated:
-            logger.warning(f"[GMS] {label}: the zone's FIRST sigma is capped - raising Global or Start further no longer moves it, and only stretches the tail of the zone. Move the zone later instead")
+            cls._log("warning", f"{label}: the zone's FIRST sigma is capped - raising Global or Start further no longer moves it, and only stretches the tail of the zone. Move the zone later instead")
 
         if report.backward:
-            logger.error(f"[GMS] {label}: the schedule steps BACKWARDS at indices {report.backward} - expect a broken or black image. Lower the start factor, or move the zone later")
+            cls._log("error", f"{label}: the schedule steps BACKWARDS at indices {report.backward} - expect a broken or black image. Lower the start factor, or move the zone later")
         elif report.is_flow and report.min_signal < 0.02:
-            logger.warning(f"[GMS] {label}: signal margin {report.min_signal:.4f} is very close to zero; the sampler divides by it")
+            cls._log("warning", f"{label}: signal margin {report.min_signal:.4f} is very close to zero; the sampler divides by it")
 
     def postprocess(self, p, processed, *args):
         cls = GreatMultiplySigmas
@@ -226,3 +257,4 @@ class GreatMultiplySigmas(scripts.Script):
         cls.show_preview = False
         cls.previews = {}
         cls.is_flow = None
+        cls.debug = False
