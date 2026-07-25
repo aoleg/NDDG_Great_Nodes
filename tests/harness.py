@@ -277,6 +277,30 @@ check(not broken, f"the guard let {len(broken)} setting(s) through: {broken[:3]}
 #   run - not a reconstruction. The signal margin at index 1 is 0.0379.
 live = torch.tensor([1.0000, 0.9621, 0.8900, 0.7847, 0.6409, 0.4579, 0.2518, 0.0735, 0.0000])
 
+#   the same model on the Simple scheduler, also read off a live log. Simple is the
+#   *tighter* of the two from index 2 on - it keeps the tail noisy where Beta crushes it.
+simple = torch.tensor([1.0000, 0.9567, 0.9045, 0.8403, 0.7595, 0.6546, 0.5128, 0.3109, 0.0000])
+
+check(guarded(simple).is_flow, "the Simple schedule was not detected as flow")
+#   headroom values the live run printed, to four decimals
+for zone, expected in ((0.2, 1.0226), (0.3, 1.0528)):
+    got = guarded(simple, zone_start=zone, zone_end=1.0).headroom
+    check(abs(got - expected) < 5e-4, f"Simple headroom at zone {zone} was {got:.4f}, the live run logged {expected}")
+#   ...and Simple is tighter than Beta from index 2, which is the opposite of what
+#   reasoning about even timestep spacing predicts
+check(guarded(simple, zone_start=0.3, zone_end=1.0).headroom < guarded(live, zone_start=0.3, zone_end=1.0).headroom,
+      "Simple is no longer the tighter schedule at zone 0.3")
+
+#   the three Simple settings that were run live: two guarded, one clean
+for name, kw, expect_guard in (
+    ("S1 start 1.05 zone 0.2", dict(start_factor=1.05, end_factor=0.85, zone_start=0.2), True),
+    ("S2 start 1.12 zone 0.3", dict(start_factor=1.12, end_factor=0.85, zone_start=0.3), True),
+    ("S3 start 0.90 zone 0.2", dict(start_factor=0.90, end_factor=0.85, zone_start=0.2), False),
+):
+    report = guarded(simple, zone_end=1.0, **kw)
+    check(bool(report.guarded) == expect_guard, f"{name}: guard fired={bool(report.guarded)}, live run said {expect_guard}")
+    invariants(report, name)
+
 #   the tester independently found Start 1.06 clean and Start 1.07 guarded at zone 0.3
 head = guarded(live, start_factor=1.0, zone_start=0.3, zone_end=1.0).headroom
 check(head is not None, "no headroom was reported")

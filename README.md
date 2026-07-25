@@ -234,31 +234,49 @@ shape of the transition between them and nothing else.
 lives roughly between **0.85 and 1.10**, which is why the sliders stop at 0.70 / 1.30 and
 step in thousandths.
 
-All the numbers below are measured on **Krea 2 Turbo, Euler a, Beta, 8 steps, CFG 1**, and
-the schedule they refer to is the one that run actually logged:
+All the numbers below are measured on **Krea 2 Turbo, Euler a, 8 steps, CFG 1**, against
+the two schedules those runs actually logged:
 
 ```text
-idx:      0       1       2       3       4       5       6       7       8
-sigma: 1.0000  0.9621  0.8900  0.7847  0.6409  0.4579  0.2518  0.0735  0.0000
-1-sig: 0.0000  0.0379  0.1100  0.2153  0.3591  0.5421  0.7482  0.9265  1.0000
+idx:        0       1       2       3       4       5       6       7       8
+Beta:    1.0000  0.9621  0.8900  0.7847  0.6409  0.4579  0.2518  0.0735  0.0000
+ 1-s:    0.0000  0.0379  0.1100  0.2153  0.3591  0.5421  0.7482  0.9265  1.0000
+Simple:  1.0000  0.9567  0.9045  0.8403  0.7595  0.6546  0.5128  0.3109  0.0000
+ 1-s:    0.0000  0.0433  0.0955  0.1597  0.2405  0.3454  0.4872  0.6891  1.0000
 ```
 
-| Setting | Result |
-| --- | --- |
-| Start `0.90`, End `0.85`, Zone `0.2 → 1.0` | **best result found** — visible composition change, clean image |
-| Global `0.95`, Zone `0.1 → 1.0` | major composition shift, coherent |
-| Start `1.06`, End `0.85`, Zone `0.3 → 1.0` | coherent, clearly changed |
-| Start `0.98`, End `0.85`, Zone `0.2 → 1.0` | usable, minor changes |
-| Global `0.98`, Zone `0.3 → 1.0` | good image, subtle |
-| Global `1.05`, Zone `0.3 → 1.0` | coherent, barely different from disabled |
-| Start `1.06`, End `0.85`, Zone `0.2 → 1.0` | **black image** without the guard |
-| Global `1.05`, Zone `0.1 → 1.0` | **black image** without the guard |
-| Start `1.15`, End `0.85`, Zone `0.3 → 1.0` | breaks without the guard; imperfect with it |
-| Start `1.25`, End `0.85`, Zone `0.4 → 1.0` | breaks mid-generation without the guard; near-inert with it |
+**Nothing here transfers to another checkpoint.** These schedules are dominated by the
+model's `shift` parameter, which is per-checkpoint: this Turbo distill measures `shift ≈
+3.158` where Forge's own `Krea2` entry declares `1.15`. Read your own numbers off the log.
 
-Read the pattern before the mechanism: **everything below 1.0 works, and the interesting
-results are all there.** Inflation is where the failures are, it needs the zone pushed
-later to be safe at all, and by the time it is safe it barely does anything.
+| Setting | Schedule | Result |
+| --- | --- | --- |
+| Start `0.90`, End `0.85`, Zone `0.2 → 1.0` | Beta | **best result found** — visible composition change, clean image |
+| Start `0.90`, End `0.85`, Zone `0.2 → 1.0` | Simple | clean, the most change of any Simple setting tried |
+| Global `0.95`, Zone `0.1 → 1.0` | Beta | major composition shift, coherent |
+| Start `1.06`, End `0.85`, Zone `0.3 → 1.0` | Beta | coherent, clearly changed |
+| Start `0.98`, End `0.85`, Zone `0.2 → 1.0` | Beta | usable, minor changes |
+| Global `0.98`, Zone `0.3 → 1.0` | Beta | good image, subtle |
+| Global `1.05`, Zone `0.3 → 1.0` | Beta | coherent, barely different from disabled |
+| Start `1.05`, End `0.85`, Zone `0.2 → 1.0` | Simple | guarded; minimal but visible change |
+| Start `1.12`, End `0.85`, Zone `0.3 → 1.0` | Simple | guarded; some change |
+| Start `1.06`, End `0.85`, Zone `0.2 → 1.0` | Beta | **black** without the guard |
+| Global `1.05`, Zone `0.1 → 1.0` | Beta | **black** without the guard |
+| Start `1.15`, End `0.85`, Zone `0.3 → 1.0` | Beta | breaks without the guard; imperfect with it |
+| Start `1.25`, End `0.85`, Zone `0.4 → 1.0` | Beta | breaks mid-generation without the guard; near-inert with it |
+
+### The conclusion, after five rounds and two schedulers
+
+**Use factors below 1.0. Leave the rest alone.**
+
+Every good result in that table is a deflation. No inflation setting was ever both safe and
+interesting: the ones with enough headroom to run unguarded were dull, and the ones strong
+enough to matter got guarded back into dullness. That is not a tuning failure, it is the
+shape of the parameterisation — see the mixing-coefficient section below.
+
+The range above 1.0 stays on the slider because it is meaningful on epsilon models
+(SD 1.5, SDXL), where sigma has no hard ceiling. On a flow model, treat it as a hazard the
+guard bounds rather than a direction to explore.
 
 Two properties of the scaled schedule explain every row, and the extension computes and
 logs both before sampling starts.
@@ -269,7 +287,7 @@ A scaled sigma that lands at or above its predecessor makes the sampler step *ba
 In `sample_euler_ancestral_RF` that puts a negative number under the square root of
 `renoise_coeff` — a NaN, and a ruined image.
 
-Start `1.15` at Zone `0.3` lifts σ[2] from 0.8900 to 1.0235, above σ[1] = 0.9621. The
+Start `1.15` at Zone `0.3` lifts Beta's σ[2] from 0.8900 to 1.0235, above σ[1] = 0.9621. The
 further into the run the reversal lands, the fewer steps remain to recover, which is why
 `1.25` at Zone `0.4` breaks visibly mid-generation rather than merely degrading.
 
@@ -302,20 +320,25 @@ at a given zone is exactly:
 headroom = min( 1 − 0.5·(1 − σ) , σ_previous·0.999 ) / σ
 ```
 
-which for the schedule above gives:
+which for the two schedules above gives:
 
-| Zone start | index | sigma | max `Global × Start` |
-| --- | --- | --- | --- |
-| 0.1 | 0 | 1.0000 | **1.000** — no inflation at all |
-| 0.2 | 1 | 0.9621 | 1.020 |
-| 0.3 | 2 | 0.8900 | **1.062** |
-| 0.4 | 3 | 0.7847 | 1.133 |
-| 0.5 | 4 | 0.6409 | 1.223 |
-| 0.7 | 5 | 0.4579 | 1.398 |
+| index | Beta σ | Beta max | Simple σ | Simple max |
+| --- | --- | --- | --- | --- |
+| 0 | 1.0000 | **1.000** — no inflation at all | 1.0000 | **1.000** |
+| 1 | 0.9621 | 1.020 | 0.9567 | 1.023 |
+| 2 | 0.8900 | **1.062** | 0.9045 | 1.053 |
+| 3 | 0.7847 | 1.133 | 0.8403 | 1.075 |
+| 4 | 0.6409 | 1.223 | 0.7595 | 1.105 |
+| 7 | 0.0735 | 3.422 | 0.3109 | 1.648 |
 
-That 1.062 is not a model — it was predicted from the formula and then confirmed against a
-live run in which Start `1.06` passed clean and Start `1.07` tripped the guard. The log
-prints this number every run.
+That Beta 1.062 is not a model — it was predicted from the formula and then confirmed
+against a live run in which Start `1.06` passed clean and Start `1.07` tripped the guard.
+The log prints this number every run.
+
+Note that **Simple is the *tighter* scheduler from index 2 on**, despite spacing its
+timesteps evenly. Beta crushes the tail (0.0735 at index 7) while Simple keeps it noisy
+(0.3109), so Simple has more signal to lose everywhere in the back half. Predicting this
+from the scheduler source got it backwards; the log settled it.
 
 **Past the headroom, turning the slider up does less, not more.** Once the zone's *first*
 sigma is capped, raising the factor no longer moves it and only stretches the tail of the
@@ -329,6 +352,13 @@ this happens. The fix is to move the zone later, never to push the factor higher
 `0.1` both resolve to **index 0** — so Zone `0.1` does not protect the first sigma at all,
 which is why Global `1.05` there scaled σ[0] itself. The log prints the resolved indices on
 every run; read them rather than assuming.
+
+### Nothing here transfers
+
+Schedules are dominated by the checkpoint's `shift`, not by the scheduler. Two attempts to
+predict this model's schedule from Forge's own model config and scheduler source were both
+wrong — the second by enough to produce three confident and entirely incorrect predictions
+about Simple. Run one generation, read the log, calibrate against that.
 
 ### Safety guard
 
