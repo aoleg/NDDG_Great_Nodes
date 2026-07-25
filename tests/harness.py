@@ -69,10 +69,7 @@ for method in cond_core.METHODS:
             check(out.dtype == dtype, f"{method}/{label}/{dtype}: dtype {out.dtype} != {dtype}")
             check(torch.isfinite(out.float()).all(), f"{method}/{label}/{dtype}: non-finite output")
 
-            #   `fourier_filter` at a positive strength is a high-pass that removes DC; on a
-            #   1-token sequence there is nothing but DC, so a no-op is the right answer
-            if method != "fourier_filter":
-                check(not torch.equal(out, base), f"{method}/{label}/{dtype}: produced no change at strength {strength}")
+            check(not torch.equal(out, base), f"{method}/{label}/{dtype}: produced no change at strength {strength}")
 
             #   determinism: same seed, same input -> same output
             again = cond_core.apply_modification(base.clone(), method, strength, 1234)
@@ -108,6 +105,11 @@ bad[0, 0] = float("nan")
 check(cond_core.apply_modification(bad, "guided_noise", 1.0, 0) is bad, "nan tensor was not refused")
 check(cond_core.apply_modification(torch.randn(8), "guided_noise", 1.0, 0).shape == (8,), "1D tensor was not refused")
 check(cond_core.apply_modification(torch.randn(2, 4, 4), "not_a_method", 1.0, 0).shape == (2, 4, 4), "unknown method was not refused")
+#   removed after testing: a positive strength stripped the conditioning's DC component
+check("fourier_filter" not in cond_core.METHODS, "fourier_filter came back")
+base = torch.randn(2, 16, 32)
+check(cond_core.apply_modification(base, "fourier_filter", 0.5, 0) is base, "fourier_filter is still dispatched")
+check(len(cond_core.METHODS) == 13, f"expected 13 methods, got {len(cond_core.METHODS)}")
 
 # the PCA dimension guard
 big = torch.randn(1, 4, cond_core.MAX_PCA_DIM + 8)
@@ -140,33 +142,67 @@ from lib_nddg import sigmas as sigma_core
 
 schedule = torch.tensor([14.6, 10.0, 6.0, 3.0, 1.5, 0.7, 0.3, 0.0])
 
-out, s, e = sigma_core.multiply_sigmas(schedule, factor_global=1.0, start_factor=1.0, end_factor=1.0)
+out, s, e, _ = sigma_core.multiply_sigmas(schedule, factor_global=1.0, start_factor=1.0, end_factor=1.0)
 check(torch.equal(out, schedule), "identity settings changed the schedule")
 check((s, e) == (0, 7), f"identity zone was {(s, e)}, expected (0, 7)")
 
-out, s, e = sigma_core.multiply_sigmas(schedule, factor_global=2.0, start_factor=1.0, end_factor=1.0)
+out, s, e, _ = sigma_core.multiply_sigmas(schedule, factor_global=2.0, start_factor=1.0, end_factor=1.0, clamp_to_max=False)
 check(torch.allclose(out, schedule * 2.0), "global factor 2.0 did not double the schedule")
 
 # zone limiting: only [zone_start_idx, zone_end_idx] moves
-out, s, e = sigma_core.multiply_sigmas(schedule, factor_global=0.5, zone_start=0.5, zone_end=1.0)
+out, s, e, _ = sigma_core.multiply_sigmas(schedule, factor_global=0.5, zone_start=0.5, zone_end=1.0)
 check((s, e) == (3, 7), f"zone indices {(s, e)}, expected (3, 7)")
 check(torch.equal(out[:3], schedule[:3]), "sigmas before the zone were modified")
 check(torch.allclose(out[3:], schedule[3:] * 0.5), "sigmas inside the zone were not halved")
 
 # linear interpolation between start and end factor
-out, s, e = sigma_core.multiply_sigmas(schedule, start_factor=1.0, end_factor=2.0, curve_type="linear")
+out, s, e, _ = sigma_core.multiply_sigmas(schedule, start_factor=1.0, end_factor=2.0, curve_type="linear")
 expected = schedule.clone()
 for i in range(8):
     expected[i] *= 1.0 + (2.0 - 1.0) * (i / 7)
 check(torch.allclose(out, expected), "linear start->end interpolation mismatch")
 
-# s_curve is a sigmoid, so the endpoints are approached, not hit
-out_s, _, _ = sigma_core.multiply_sigmas(schedule, start_factor=1.0, end_factor=2.0, curve_type="s_curve", curve_strength=2.0)
+# s_curve is normalised: it changes the shape between the endpoints, and hits both
+out_s, _, _, _ = sigma_core.multiply_sigmas(schedule, start_factor=1.0, end_factor=2.0, curve_type="s_curve", curve_strength=2.0)
 check(not torch.allclose(out_s, expected), "s_curve matched linear")
-check(out_s[0] > schedule[0] and out_s[-2] < schedule[-2] * 2.0, "s_curve endpoints look wrong")
+#   a flat schedule makes the factor readable straight off the output; the real one ends
+#   at 0.0, where any factor is invisible
+flat = torch.ones(9)
+curve, _, _, _ = sigma_core.multiply_sigmas(flat, start_factor=1.0, end_factor=2.0, curve_type="s_curve", curve_strength=2.0, clamp_to_max=False)
+check(abs(float(curve[0]) - 1.0) < 1e-6, f"s_curve did not hit the start factor (got {float(curve[0]):.6f})")
+check(abs(float(curve[-1]) - 2.0) < 1e-6, f"s_curve did not hit the end factor (got {float(curve[-1]):.6f})")
+line, _, _, _ = sigma_core.multiply_sigmas(flat, start_factor=1.0, end_factor=2.0, curve_type="linear", clamp_to_max=False)
+check(abs(float(line[4]) - 1.5) < 1e-6, "linear midpoint is not halfway")
+check(abs(float(curve[4]) - 1.5) < 1e-6, "s_curve midpoint is not halfway")
+check(sigma_core.interpolate_curve(0.0, "s_curve", 2.0) == 0.0, "interpolate_curve(0) != 0")
+check(abs(sigma_core.interpolate_curve(1.0, "s_curve", 2.0) - 1.0) < 1e-12, "interpolate_curve(1) != 1")
+check(abs(sigma_core.interpolate_curve(0.5, "s_curve", 2.0) - 0.5) < 1e-12, "s_curve is not symmetric about 0.5")
+#   curve strength must change shape only, never overall strength
+for strength in (0.1, 1.0, 5.0, 10.0):
+    check(sigma_core.interpolate_curve(0.0, "s_curve", strength) == 0.0, f"s_curve strength {strength}: t=0 != 0")
+    check(abs(sigma_core.interpolate_curve(1.0, "s_curve", strength) - 1.0) < 1e-12, f"s_curve strength {strength}: t=1 != 1")
+
+# the clamp: sigmas may never exceed the schedule's own maximum
+tight, _, _, clamped = sigma_core.multiply_sigmas(schedule, start_factor=1.2, end_factor=1.2, clamp_to_max=True)
+check(clamped > 0, "clamp reported nothing on an inflating schedule")
+check(float(tight.max()) <= float(schedule.max()) + 1e-6, "clamped schedule still exceeds its maximum")
+check(torch.allclose(tight[0], schedule[0]), "clamp did not pin the first sigma")
+loose, _, _, unclamped = sigma_core.multiply_sigmas(schedule, start_factor=1.2, end_factor=1.2, clamp_to_max=False)
+check(unclamped == 0, "clamp counted while disabled")
+check(float(loose.max()) > float(schedule.max()), "disabling the clamp did not let sigmas exceed the maximum")
+#   deflation is always safe and must never trip the clamp
+_, _, _, none_clamped = sigma_core.multiply_sigmas(schedule, start_factor=0.9, end_factor=0.8, clamp_to_max=True)
+check(none_clamped == 0, "the clamp fired on a purely deflating schedule")
+
+#   a flow-matching schedule: sigma is a mixing coefficient and 1.0 is a hard ceiling
+flow = torch.tensor([1.0, 0.9887, 0.9650, 0.9324, 0.8913, 0.5359, 0.1400, 0.0161, 0.0])
+capped, _, _, hits = sigma_core.multiply_sigmas(flow, start_factor=1.10, end_factor=0.85, zone_start=0.0, zone_end=1.0, clamp_to_max=True)
+check(float(capped.max()) <= 1.0 + 1e-6, f"flow schedule exceeded 1.0: {float(capped.max())}")
+check(hits > 0, "the clamp did not fire on an inflated flow schedule")
+check((1.0 - capped >= -1e-6).all(), "the data coefficient (1 - sigma) went negative")
 
 # reversed zone is swapped, not empty
-_, s, e = sigma_core.multiply_sigmas(schedule, zone_start=0.9, zone_end=0.1)
+_, s, e, _ = sigma_core.multiply_sigmas(schedule, zone_start=0.9, zone_end=0.1)
 check(s < e, f"reversed zone was not swapped: {(s, e)}")
 
 # input is never mutated
@@ -470,7 +506,7 @@ GMS = gms.GreatMultiplySigmas
 sigma_script = GMS()
 
 returned = sigma_script.ui(False)
-gms_args = [True, 1.0, 1.0, 2.0, 0.0, 1.0, "linear", 2.0, True, False]
+gms_args = [True, 1.0, 1.0, 2.0, 0.0, 1.0, "linear", 2.0, False, True, False]
 check(len(returned) == len(gms_args), f"GMS ui() returns {len(returned)}, hooks unpack {len(gms_args)}")
 
 
@@ -483,8 +519,8 @@ class FakeSampler:
         return torch.linspace(14.6, 0.0, steps + 1)
 
 
-def gms_ui(enable=True, factor_global=1.0, start_factor=1.0, end_factor=2.0, zone_start=0.0, zone_end=1.0, curve="linear", curve_strength=2.0, apply_to_hr=True, preview=False):
-    return [enable, factor_global, start_factor, end_factor, zone_start, zone_end, curve, curve_strength, apply_to_hr, preview]
+def gms_ui(enable=True, factor_global=1.0, start_factor=1.0, end_factor=2.0, zone_start=0.0, zone_end=1.0, curve="linear", curve_strength=2.0, clamp=False, apply_to_hr=True, preview=False):
+    return [enable, factor_global, start_factor, end_factor, zone_start, zone_end, curve, curve_strength, clamp, apply_to_hr, preview]
 
 
 # identity settings must not wrap at all
@@ -551,6 +587,24 @@ sigma_script.postprocess(p, processed)
 check(len(processed.extra_images) == 1, f"expected 1 preview image, got {len(processed.extra_images)}")
 check(GMS.previews == {}, "postprocess did not clear the previews")
 check(GMS.enabled is False, "postprocess did not reset `enabled`")
+
+# the clamp reaches the wrapper, caps the schedule, and says so
+LOGGER.lines.clear()
+p = FakeP()
+p.sampler = FakeSampler()
+sigma_script.process(p, *gms_ui(start_factor=1.3, end_factor=1.3, clamp=True))
+sigma_script.process_before_every_sampling(p, *gms_ui(start_factor=1.3, end_factor=1.3, clamp=True))
+clamped_schedule = p.sampler.get_sigmas(p, 8)
+check(float(clamped_schedule.max()) <= 14.6 + 1e-4, f"the wrapper let a sigma past the maximum ({float(clamped_schedule.max())})")
+check(any(kind == "warning" and "clamped" in line for kind, line in LOGGER.lines), "the clamp fired without warning")
+check(p.extra_generation_params["GMS clamp"] is True, "the clamp is missing from the infotext")
+
+# with the clamp off the same settings run free
+p = FakeP()
+p.sampler = FakeSampler()
+sigma_script.process(p, *gms_ui(start_factor=1.3, end_factor=1.3, clamp=False))
+sigma_script.process_before_every_sampling(p, *gms_ui(start_factor=1.3, end_factor=1.3, clamp=False))
+check(float(p.sampler.get_sigmas(p, 8).max()) > 14.6, "disabling the clamp did not let the schedule inflate")
 
 # a non-tensor schedule passes straight through
 p = FakeP()

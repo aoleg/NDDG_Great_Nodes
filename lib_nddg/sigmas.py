@@ -12,15 +12,39 @@ LINEAR = "linear"
 S_CURVE = "s_curve"
 CURVE_TYPES = [LINEAR, S_CURVE]
 
+#   Measured, not guessed.  Everything usable sits between roughly 0.85 and 1.10; the
+#   original 0-10 range put that in 2.5% of the slider.  These leave headroom either side
+#   of the tested band without wasting the travel.
+MIN_FACTOR = 0.70
+MAX_FACTOR = 1.30
+
+#   A constant factor cancels out of the sampler's update entirely — the step it takes
+#   through latent space is unchanged, and all that is left is the model being told a noise
+#   level the latent does not carry, plus the initial-noise magnitude if the zone reaches
+#   sigma[0].  It is the weak knob and does not need fine resolution.
+MIN_GLOBAL = 0.50
+MAX_GLOBAL = 2.00
+
 
 def interpolate_curve(t: float, curve_type: str, strength: float) -> float:
     """Position `t` in [0, 1] -> blend weight between the start and end factor."""
 
     if curve_type == S_CURVE:
-        #   a plain sigmoid, so t=0 lands at 1/(1+e^strength) rather than exactly 0 —
-        #   the start/end factors are targets the curve approaches, not endpoints it hits
-        return 1.0 / (1.0 + math.exp(-((t - 0.5) * strength * 2.0)))
+        #   Normalised so t=0 gives exactly 0 and t=1 exactly 1.  Upstream used the raw
+        #   sigmoid, which at strength 2 spans only 0.119..0.881 — so switching curve type
+        #   silently changed how much of the start/end range was actually applied, and
+        #   raising Curve strength made the effect *stronger* as a side effect of widening
+        #   that span.  Here the curve changes the shape and nothing else.
+        low = _sigmoid(-strength)
+        high = _sigmoid(strength)
+        if high - low < 1e-12:
+            return t
+        return (_sigmoid((t - 0.5) * strength * 2.0) - low) / (high - low)
     return t
+
+
+def _sigmoid(x: float) -> float:
+    return 1.0 / (1.0 + math.exp(-x))
 
 
 def zone_indices(total: int, zone_start: float, zone_end: float) -> tuple[int, int]:
@@ -40,15 +64,27 @@ def multiply_sigmas(
     zone_start: float = 0.0,
     zone_end: float = 1.0,
     curve_strength: float = 2.0,
-) -> tuple[torch.Tensor, int, int]:
-    """Return `(new_sigmas, zone_start_index, zone_end_index)`.
+    clamp_to_max: bool = True,
+) -> tuple[torch.Tensor, int, int, int]:
+    """Return `(new_sigmas, zone_start_index, zone_end_index, clamped_count)`.
 
     Sigmas outside `[zone_start_index, zone_end_index]` are left exactly as they were.
+
+    `clamp_to_max` caps every scaled sigma at the schedule's own maximum.  On epsilon
+    models that only avoids a schedule that starts above where the sampler thinks it
+    starts.  On flow-matching models (Krea 2, Flux, SD3, Qwen — anything whose predictor
+    reports `prediction_type == "const"`) it is load-bearing: sigma there is not a noise
+    *scale* but the mixing coefficient of `x = sigma * noise + (1 - sigma) * data`, so it
+    is only defined on [0, 1].  Their schedules start at exactly 1.0, and any factor above
+    1.0 near the head of the run drives the data coefficient `1 - sigma` to zero or
+    negative — which `AbstractPrediction.inverse_noise_scaling` then divides by, and which
+    `sample_euler_ancestral_RF` takes a square root through.  Deflation is always safe;
+    inflation is the cliff, and this is where it stops.
     """
 
     total = len(sigmas)
     if total == 0:
-        return sigmas, 0, 0
+        return sigmas, 0, 0, 0
 
     result = sigmas.clone()
     start_idx, end_idx = zone_indices(total, zone_start, zone_end)
@@ -60,7 +96,15 @@ def multiply_sigmas(
         local_factor = start_factor + (end_factor - start_factor) * curve_value
         result[i] *= factor_global * local_factor
 
-    return result, start_idx, end_idx
+    clamped = 0
+    if clamp_to_max:
+        ceiling = float(sigmas.max())
+        over = result > ceiling
+        clamped = int(over.sum())
+        if clamped:
+            result[over] = ceiling
+
+    return result, start_idx, end_idx, clamped
 
 
 def is_identity(factor_global: float, start_factor: float, end_factor: float) -> bool:

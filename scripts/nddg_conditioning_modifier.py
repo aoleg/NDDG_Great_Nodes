@@ -100,6 +100,12 @@ class GreatConditioningModifier(scripts.Script):
                 apply_to_hr = gr.Checkbox(True, label="Apply to the Hires. fix pass")
                 debug = gr.Checkbox(False, label="Debug", info="log tensor statistics to the console")
 
+        #   `ui-config.json` caches a dropdown's value and a slider's bounds across
+        #   restarts, which would resurrect `fourier_filter` for anyone who had it selected
+        #   before it was removed.  Values still round-trip through the infotext below.
+        for component in (method, target, strength):
+            component.do_not_save_to_config = True
+
         self.infotext_fields = [
             (enable, lambda d: "GCM method" in d),
             (method, "GCM method"),

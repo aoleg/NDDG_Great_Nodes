@@ -1,8 +1,10 @@
-"""The fourteen conditioning modifiers of the Great Conditioning Modifier.
+"""The thirteen conditioning modifiers of the Great Conditioning Modifier.
 
 Framework-agnostic: every function takes and returns a plain ``torch.Tensor``.  The maths
-is the original node's, with four deliberate changes, all of which matter inside a WebUI
-sampling loop and none of which matter inside a ComfyUI graph:
+is the original node's, minus ``fourier_filter`` — testing confirmed it is non-functional
+in both directions, so it is not offered rather than shipped with a warning — and with four
+deliberate changes, all of which matter inside a WebUI sampling loop and none of which
+matter inside a ComfyUI graph:
 
 1.  **Seeding is explicit.**  The original calls ``torch.manual_seed(seed)``, which resets
     the *global* RNG.  In ComfyUI that happens once, at graph-execution time.  Here the
@@ -18,8 +20,8 @@ sampling loop and none of which matter inside a ComfyUI graph:
     or ``(batch, tokens, embed)`` — Krea 2's Qwen3-VL encoder produces a 4D
     ``(chunks, 1, seq, embed)`` tensor.  Every entry point reshapes to
     ``(batch, tokens, embed)`` and restores the original shape on the way out, so the
-    seven methods that upstream gates behind ``len(shape) == 3`` are live on every model
-    rather than silently doing nothing.
+    methods that upstream gates behind ``len(shape) == 3`` are live on every model rather
+    than silently doing nothing.
 
 4.  **`principal_component` has a dimension guard.**  It builds an ``(embed, embed)``
     covariance matrix and eigendecomposes it.  At SDXL's 2048 features that is cheap; at
@@ -37,7 +39,6 @@ GRADIENT_AMPLIFY = "gradient_amplify"
 GUIDED_NOISE = "guided_noise"
 QUANTIZE = "quantize"
 PERLIN_NOISE = "perlin_noise"
-FOURIER_FILTER = "fourier_filter"
 STYLE_SHIFT = "style_shift"
 TEMPERATURE_SCALE = "temperature_scale"
 EMBEDDING_MIX = "embedding_mix"
@@ -53,7 +54,6 @@ METHODS = [
     GUIDED_NOISE,
     QUANTIZE,
     PERLIN_NOISE,
-    FOURIER_FILTER,
     STYLE_SHIFT,
     TEMPERATURE_SCALE,
     EMBEDDING_MIX,
@@ -270,19 +270,6 @@ def _dispatch(work, method, strength, generator, original_mean, original_std, lo
         if log:
             log(f"  rotations: {num_rotations} planes")
         return normalized * norms
-
-    if method == FOURIER_FILTER:
-        fft = torch.fft.fft(modified, dim=1)
-        freqs = torch.fft.fftfreq(seq, device=device)
-        if is_negative:
-            cutoff = 1.0 - abs_strength * 0.8
-            filter_mask = (freqs.abs() < cutoff).float().unsqueeze(0).unsqueeze(-1)
-        else:
-            cutoff = abs_strength * 0.5
-            filter_mask = (freqs.abs() > cutoff).float().unsqueeze(0).unsqueeze(-1)
-        if log:
-            log(f"  fourier: cutoff {cutoff:.3f}, {'low-pass' if is_negative else 'high-pass'}")
-        return torch.fft.ifft(fft * filter_mask, dim=1).real
 
     if method == PRINCIPAL_COMPONENT:
         if embed > MAX_PCA_DIM:
