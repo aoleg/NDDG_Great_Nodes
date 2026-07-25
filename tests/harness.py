@@ -1,14 +1,13 @@
 """Offline harness for the NDDG Great Nodes extension.
 
-Four tiers, no GPU, no checkpoint and no running webui — it needs only torch, numpy and
-Pillow, so the quickest way to run it is with the webui's own interpreter:
+Three tiers, no GPU, no checkpoint and no running webui — it needs only torch and numpy,
+so the quickest way to run it is with the webui's own interpreter:
 
     <forge>/venv/Scripts/python.exe tests/harness.py
 
   1. lib_nddg.conditioning  - every method, every rank, both dtypes
   2. lib_nddg.sigmas        - zone/curve maths against a hand-computed reference
-  3. lib_nddg.generators    - the three image ops
-  4. scripts/*.py           - the hooks, under a stubbed `modules` + `gradio`
+  3. scripts/*.py           - the hooks, under a stubbed `modules` + `gradio`
 """
 
 import importlib.util
@@ -186,69 +185,8 @@ check(graph is not None and graph.size[0] > 100, "comparison_graph did not rende
 print(f"  {checks} checks so far")
 
 # ---------------------------------------------------------------------------------------
-section("tier 3 - lib_nddg.generators")
+section("tier 3 - the scripts, under a stubbed webui")
 # ---------------------------------------------------------------------------------------
-
-from PIL import Image
-
-from lib_nddg import generators as gen_core
-
-for shape in gen_core.BLOB_SHAPES:
-    image, palette, palette_hex, seed = gen_core.interactive_gradient(width=192, height=128, blob_shape=shape, seed=11)
-    check(image.size == (192, 128), f"interactive/{shape}: size {image.size}")
-    check(image.mode == "RGBA", f"interactive/{shape}: mode {image.mode}")
-    check(np.array(image).any(), f"interactive/{shape}: produced an empty image")
-    check(palette_hex.count("#") == 2, f"interactive/{shape}: palette hex {palette_hex!r}")
-    again = gen_core.interactive_gradient(width=192, height=128, blob_shape=shape, seed=11)[0]
-    check(np.array_equal(np.array(image), np.array(again)), f"interactive/{shape}: not reproducible at a fixed seed")
-
-check(gen_core.parse_stops("not json")[0]["color"] == "#ff0000", "parse_stops did not fall back")
-check(len(gen_core.parse_stops('[{"x":0.1,"y":0.2,"color":"#010203"},{"bad":1}]')) == 1, "parse_stops kept a malformed stop")
-check(gen_core.parse_stops("[]") == gen_core.FALLBACK_STOPS, "parse_stops did not fall back on an empty list")
-
-custom = '[{"x":0.1,"y":0.1,"color":"#112233"},{"x":0.5,"y":0.5,"color":"#445566"},{"x":0.9,"y":0.9,"color":"#778899"}]'
-image, palette, palette_hex, seed = gen_core.interactive_gradient(width=128, height=128, gradient_data=custom, seed=1)
-check(palette_hex == "#112233, #445566, #778899", f"palette hex {palette_hex!r}")
-
-for shape in gen_core.RANDOM_BLOB_SHAPES:
-    image, palette, palette_hex, seed = gen_core.random_organic_gradient(width=192, height=128, blob_shape=shape, seed=7)
-    check(image.size == (192, 128), f"random/{shape}: size {image.size}")
-    check(seed == 7, f"random/{shape}: seed {seed}")
-    again = gen_core.random_organic_gradient(width=192, height=128, blob_shape=shape, seed=7)[0]
-    check(np.array_equal(np.array(image), np.array(again)), f"random/{shape}: not reproducible at a fixed seed")
-
-image, _, palette_hex, _ = gen_core.random_organic_gradient(width=128, height=128, colors=3, random_palette=False, custom_colors=["#FF0000", "#00FF00", "", "#0000FF"], seed=2)
-check(palette_hex.startswith("#FF0000, #00FF00, #0000FF"), f"custom palette {palette_hex!r}")
-
-image, _, _, used = gen_core.random_organic_gradient(width=128, height=128, seed=-1)
-check(used >= 0, "random seed -1 did not report a concrete seed")
-
-transparent = gen_core.random_organic_gradient(width=64, height=64, blob_count=1, transparent_background=True, seed=3)[0]
-check(np.array(transparent)[..., 3].min() == 0, "transparent background was opaque everywhere")
-
-a = Image.new("RGB", (64, 48), (200, 100, 50))
-b = Image.new("RGB", (32, 32), (10, 220, 120))
-for mode in gen_core.BLEND_MODES:
-    out = gen_core.blend_images(a, b, mode, 1.0)
-    check(out.size == (64, 48), f"blend/{mode}: size {out.size}")
-    check(out.mode == "RGB", f"blend/{mode}: mode {out.mode}")
-
-check(np.array_equal(np.array(gen_core.blend_images(a, b, "normal", 0.0)), np.array(a)), "opacity 0 was not a no-op")
-replaced = np.array(gen_core.blend_images(a, b, "normal", 1.0))
-check(replaced.reshape(-1, 3).std(axis=0).max() < 1.0, "opacity 1 / normal was not flat")
-check(np.abs(replaced.reshape(-1, 3).mean(axis=0) - np.array([10, 220, 120])).max() <= 1.0, "opacity 1 / normal did not fully replace A")
-
-rgba = Image.new("RGBA", (40, 40), (0, 0, 255, 0))
-check(np.array_equal(np.array(gen_core.blend_images(a, rgba, "normal", 1.0)), np.array(a)), "a fully transparent overlay changed the base")
-
-print(f"  {checks} checks so far")
-
-# ---------------------------------------------------------------------------------------
-section("tier 4 - the scripts, under a stubbed webui")
-# ---------------------------------------------------------------------------------------
-
-
-CLICKS = []
 
 
 class _Component:
@@ -266,8 +204,7 @@ class _Component:
     def change(self, *args, **kwargs):
         return None
 
-    def click(self, fn=None, inputs=None, outputs=None, **kwargs):
-        CLICKS.append((fn, list(inputs or []), list(outputs or [])))
+    def click(self, *args, **kwargs):
         return None
 
     def render(self):
@@ -276,7 +213,7 @@ class _Component:
 
 def _install_stubs():
     gradio = types.ModuleType("gradio")
-    for name in ("Slider", "Dropdown", "Radio", "Checkbox", "Number", "Textbox", "HTML", "Button", "Row", "Column", "Group", "Blocks", "Tabs", "TabItem", "Image", "ColorPicker", "Gallery", "Accordion"):
+    for name in ("Slider", "Dropdown", "Radio", "Checkbox", "Number", "Textbox", "HTML", "Button", "Row", "Column", "Group", "Blocks", "Accordion"):
         setattr(gradio, name, _Component)
     gradio.update = lambda **kwargs: kwargs
     gradio.Error = type("Error", (Exception,), {})
@@ -333,15 +270,8 @@ def _install_stubs():
 
     callbacks.CFGDenoiserParams = CFGDenoiserParams
     callbacks.on_cfg_denoiser = lambda fn: registered.append(fn)
-    callbacks.on_ui_tabs = lambda fn: registered.append(fn)
     sys.modules["modules.script_callbacks"] = callbacks
     modules.script_callbacks = callbacks
-
-    infotext = types.ModuleType("modules.infotext_utils")
-    infotext.ParamBinding = lambda **kwargs: kwargs
-    infotext.register_paste_params_button = lambda binding: None
-    sys.modules["modules.infotext_utils"] = infotext
-    modules.infotext_utils = infotext
 
     prompt_parser = types.ModuleType("modules.prompt_parser")
 
@@ -373,7 +303,6 @@ def load(name, path):
 
 gcm = load("nddg_conditioning_modifier", REPO / "scripts" / "nddg_conditioning_modifier.py")
 gms = load("nddg_multiply_sigmas", REPO / "scripts" / "nddg_multiply_sigmas.py")
-tab = load("nddg_tab", REPO / "scripts" / "nddg_tab.py")
 
 GCM = gcm.GreatConditioningModifier
 
@@ -630,33 +559,6 @@ p.sampler.get_sigmas = lambda processing, steps: "not a tensor"
 sigma_script.process(p, *gms_ui())
 sigma_script.process_before_every_sampling(p, *gms_ui())
 check(p.sampler.get_sigmas(p, 8) == "not a tensor", "a non-tensor schedule was not passed through")
-
-# --- the tab builds without raising
-CLICKS.clear()
-built = tab.on_ui_tabs()
-check(len(built) == 1 and built[0][1] == "NDDG", f"on_ui_tabs returned {built}")
-check(len(CLICKS) == 3, f"expected 3 wired buttons on the tab, got {len(CLICKS)}")
-
-#   drive each Generate button with the components' own default values, so an inputs list
-#   that drifts out of step with its handler's signature fails here and not in the browser
-for index, (fn, inputs, outputs) in enumerate(CLICKS):
-    values = [component.value for component in inputs]
-    if any(value is None for value in values):
-        #   the blend tab's two image inputs start empty
-        values = [Image.new("RGB", (48, 32), (200, 100, 50)) if value is None else value for value in values]
-    try:
-        result = fn(*values)
-    except TypeError as exception:
-        check(False, f"tab handler {index}: inputs do not match the signature ({exception})")
-        continue
-    produced = len(result) if isinstance(result, tuple) else 1
-    check(produced == len(outputs), f"tab handler {index}: returns {produced} values, {len(outputs)} outputs wired")
-    first = result[0] if isinstance(result, tuple) else result
-    check(isinstance(first, Image.Image), f"tab handler {index}: first output is {type(first).__name__}, not an image")
-
-check(tab._as_hex("#aabbcc") == "#AABBCC", "_as_hex did not normalise a hex string")
-check(tab._as_hex("rgba(255, 0, 0, 1)") == "#FF0000", "_as_hex did not parse rgba()")
-check(tab._as_hex(None) == "#FFFFFF", "_as_hex did not fall back")
 
 # ---------------------------------------------------------------------------------------
 print(f"\n{checks} checks, {len(failures)} failures")

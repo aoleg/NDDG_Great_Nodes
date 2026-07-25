@@ -1,16 +1,13 @@
 # NDDG Great Nodes — for WebUI Forge
 
-Five tools for [WebUI Forge (Neo)](https://github.com/Haoming02/sd-webui-forge-classic):
-two generation-time scripts that sit in the txt2img/img2img accordion list, and three
-image generators on their own **NDDG** tab.
+Two generation-time scripts for
+[WebUI Forge (Neo)](https://github.com/Haoming02/sd-webui-forge-classic), both in the
+txt2img and img2img accordion list.
 
-| | What it is | Where it lives |
+| | What it is | Character |
 | --- | --- | --- |
-| 🍄 **Great Conditioning Modifier** | Fourteen ways to nudge the prompt conditioning before the model reads it | txt2img / img2img accordion |
-| 🍄 **Great Multiply Sigmas** | Zone-limited, curve-interpolated scaling of the noise schedule | txt2img / img2img accordion |
-| 🍄 **Interactive Organic Gradient** | Colour-stop gradient painter with a click-and-drag canvas | **NDDG** tab |
-| 🍄 **Random Organic Gradient** | Random blob-field gradients from a random or hand-picked palette | **NDDG** tab |
-| 🍄 **Image Blend** | Nine blend modes with cover-fit and opacity | **NDDG** tab |
+| 🍄 **Great Conditioning Modifier** | Fourteen ways to nudge the prompt conditioning before the model reads it | Gentle. A safe variability knob |
+| 🍄 **Great Multiply Sigmas** | Zone-limited, curve-interpolated scaling of the noise schedule | Sharp. Small numbers, large consequences |
 
 ## Install
 
@@ -26,9 +23,9 @@ or clone into your Forge `extensions` directory and restart:
 git clone https://github.com/aoleg/NDDG_Great_Nodes
 ```
 
-No extra dependencies — everything used (torch, numpy, Pillow, matplotlib) already ships
-in the Forge venv. The before/after graph in *Great Multiply Sigmas* is the only thing
-that needs matplotlib, and it degrades to a log line if it is missing.
+No extra dependencies — everything used (torch, numpy, matplotlib) already ships in the
+Forge venv. The before/after graph in *Great Multiply Sigmas* is the only thing that needs
+matplotlib, and it degrades to a log line if it is missing.
 
 ---
 
@@ -37,6 +34,13 @@ that needs matplotlib, and it degrades to a log line if it is missing.
 Your prompt becomes a tensor before the model ever sees it. This nudges that tensor —
 adding noise to it, dropping parts of it, rotating it, filtering it — so you get
 variations that a different seed alone will not give you.
+
+**It is a gentle control, and that is the point.** At low strengths the effect is subtle;
+even at the extremes of the slider (−10 / +10) it stays minor. It shifts composition,
+framing and detail without breaking the image: in testing it did not produce a ruined
+generation at any setting. Treat it as a safe way to widen the variation you get out of one
+prompt — turn it on, leave it on, and expect nudges rather than transformations. If you
+want something violent, that is what *Great Multiply Sigmas* below is for.
 
 Open the accordion, tick it on, pick a **Method**, and move **Modification strength** off
 zero. Strength 0 is a hard no-op.
@@ -157,6 +161,11 @@ survives. Perfect for unusual compositions with recognisable elements.
 * **Stabilisation** — negative `temperature_scale`, −0.3 to −0.5
 * **Artistic effects** — `quantize` at 0.7 – 1.0, `block_shuffle` at 1.0 – 2.0
 
+Do not be shy with the slider. These figures are the original author's ranges and they are
+conservative; the full ±10 is usable, and the difference between 1 and 10 is smaller than
+you would expect. Set `Seed` to `-1` and the modification changes with every generation
+seed, which is the easiest way to use it — one prompt, more distinct results, no risk.
+
 ### Three things worth knowing
 
 * **`block_shuffle` needs |strength| ≥ 1.0.** Below that the block size is larger than half
@@ -196,43 +205,46 @@ sigma-min/sigma-max overrides in Settings all still run first — this only scal
 produced. `s_curve` is a plain sigmoid, so the start and end factors are targets it
 approaches rather than values it lands on exactly; `linear` hits both.
 
----
+### ⚠️ Read this before touching the sliders
 
-## 🍄 The NDDG tab
+**This is a sharp instrument, and the useful range is tiny.** The sliders run to 10, but
+everything worth having lives between roughly **0.85 and 1.10** — that is why the step is
+`0.001`. For scale:
 
-Three image tools that produce a picture and hand it straight to
-**txt2img / img2img / inpaint / extras** with the standard *Send to* buttons.
+* Start factor `1.05`, End factor `0.85`, Zone `0.2 → 1.0` gives a *very* different but
+  still coherent image.
+* Start factor `1.10` at the same zone is practically pure noise.
 
-### Interactive Gradient
+Two different things happen when you scale sigmas, and they are not equally strong.
 
-One blob per colour stop, blurred, faded and composited in order. The canvas is the
-editor:
+**Global factor is the weak knob.** Scaling the whole schedule by a constant cancels out
+of the sampler's update — the step it takes through latent space is unchanged. All that is
+left is the model being told a noise level that is not the one the latent actually carries,
+plus, if the zone reaches `sigmas[0]`, a change to the magnitude of the initial noise.
 
-* **click** empty space to add a stop in the current colour
-* **drag** a stop to move it
-* **click** a stop to select it, then use the colour picker to recolour it
-* **right-click** a stop to remove it
+**Start → End is the strong knob**, because a *varying* factor changes the ratio between
+consecutive sigmas, so every step removes a little more or less than the schedule intended.
 
-The JSON textbox underneath is what the generator actually reads, and stays editable by
-hand. Eleven blob shapes: `circle`, `radial`, `donut`, `rectangle`, `horizontal_stripe`,
-`vertical_stripe`, `diamond`, `triangle`, `star`, `blob_random`, `spore`. **Radial
-smoothness** controls both the falloff of the `radial` shape and the sharpness of the
-colour interpolation. The seed only matters for `blob_random` and `spore`, the two shapes
-with randomised outlines.
+But compounding is not the whole story either. On a 20-step Karras schedule, `1.05 → 0.85`
+and `1.10 → 0.85` accumulate almost exactly the same total correction (×0.863 and ×0.866) —
+what separates the coherent result from the noise is how large the factor is at the *head*
+of the zone, where sigma is biggest and the steps are longest. **The start factor's
+absolute value is the dangerous parameter; the end factor, landing where sigma is tiny, is
+comparatively forgiving.**
 
-### Random Organic Gradient
+Two more consequences worth internalising:
 
-Scatters blobs from a palette across the canvas and blurs the lot. Leave **Random palette**
-on for a fresh palette every run, or turn it off to pick up to eight colours yourself —
-unset slots are filled randomly. Backgrounds can be a fixed colour, random, or fully
-transparent. A seed of `-1` randomises and reports back the seed it used, so a result you
-like can be reproduced.
+* **The same start/end pair is not the same strength at a different step count.** The
+  per-step drift is `(end/start) ^ (1 / zone_steps)`: `1.05 → 0.85` is 1.3% per step over a
+  16-step zone but 0.66% over 32. Re-tune when you change steps.
+* **Leave the first sigma alone unless you mean it.** A zone starting at `0` scales
+  `sigmas[0]`, which is both the model's first noise-level input *and* the multiplier on
+  the initial latent noise. Starting the zone at `0.1 – 0.2` avoids that and is why the
+  settings above are usable at all.
 
-### Image Blend
-
-Image B is scaled to *cover* image A, centre-cropped, then blended over it with one of
-`normal`, `multiply`, `screen`, `overlay`, `add`, `subtract`, `difference`, `lighten`,
-`darken` at the chosen opacity. The result keeps A's dimensions.
+Note also that the zone sliders are far more precise than they can be: they resolve to a
+step index, so on a 20-step run the 1001 positions of a zone slider reach only 21 distinct
+values.
 
 ---
 
@@ -241,16 +253,13 @@ Image B is scaled to *cover* image A, centre-cropped, then blended over it with 
 ```text
 scripts/nddg_conditioning_modifier.py   the on_cfg_denoiser hook
 scripts/nddg_multiply_sigmas.py         the get_sigmas wrapper
-scripts/nddg_tab.py                     the NDDG tab
-javascript/nddg_gradient_editor.js      the colour-stop canvas
 lib_nddg/conditioning.py                the fourteen modifiers
 lib_nddg/sigmas.py                      zone/curve scaling + the preview graph
-lib_nddg/generators.py                  the gradient and blend maths
 lib_nddg/xyz.py                         X/Y/Z Plot axes
 tests/harness.py                        offline test harness — no GPU, no model, no webui
 ```
 
-To run the tests, use the webui's own interpreter so torch and Pillow are on the path:
+To run the tests, use the webui's own interpreter so torch is on the path:
 
 ```bash
 sd-webui-forge-classic/venv/Scripts/python.exe tests/harness.py
@@ -258,7 +267,8 @@ sd-webui-forge-classic/venv/Scripts/python.exe tests/harness.py
 
 ## Credits
 
-Originally written by **NDDG** as a ComfyUI node pack. *Great Multiply Sigmas* extends the
-`MultiplySigmas` node from
+Originally written by **NDDG** as a ComfyUI node pack; the three image-generator nodes of
+that pack had no useful role in a WebUI and are not part of this extension.
+*Great Multiply Sigmas* extends the `MultiplySigmas` node from
 [Jonseed/ComfyUI-Detail-Daemon](https://github.com/Jonseed/ComfyUI-Detail-Daemon) with an
 s-curve, separate start/end factors and a preview.
