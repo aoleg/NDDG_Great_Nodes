@@ -212,8 +212,8 @@ section after the table before moving anything.
 | Control | Range | Default | What it does |
 | --- | --- | --- | --- |
 | Global factor | 0.50 – 2.00, step 0.005 | `1` | Multiplies the whole zone, on top of the start/end interpolation |
-| Start factor | 0.70 – 1.30, step 0.001 | `1` | The factor at the beginning of the zone. **Above 1.0 this is the dangerous one** |
-| End factor | 0.70 – 1.30, step 0.001 | `1` | The factor at the end of the zone. Far more forgiving |
+| Start factor | 0.70 – 1.30, step 0.01 | `1` | The factor at the beginning of the zone. **Above 1.0 this is the dangerous one** |
+| End factor | 0.70 – 1.30, step 0.01 | `1` | The factor at the end of the zone. Far more forgiving |
 | Zone start / Zone end | 0 – 1, step 0.01 | `0` / `1` | Fraction of the schedule to touch; sigmas outside are left exactly as they were |
 | Skip first N sigmas | 0 – 20, step 1 | `0` | A hard floor on the zone, in **steps** rather than fractions. Never lowers the zone, only raises it |
 | Curve | — | `linear` | How the start factor is interpolated into the end factor |
@@ -233,8 +233,7 @@ shape of the transition between them and nothing else.
 ### ⚠️ Read this before touching the sliders
 
 **This is a sharp instrument and the useful range is narrow.** Everything worth having
-lives roughly between **0.85 and 1.10**, which is why the sliders stop at 0.70 / 1.30 and
-step in thousandths.
+lives roughly between **0.85 and 1.10**, which is why the sliders stop at 0.70 / 1.30.
 
 All the numbers below are measured on **Krea 2 Turbo, Euler a, 8 steps, CFG 1**, against
 the two schedules those runs actually logged:

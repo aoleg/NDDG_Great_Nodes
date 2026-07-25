@@ -46,8 +46,8 @@ class GreatMultiplySigmas(scripts.Script):
             factor_global = gr.Slider(value=1.0, minimum=core.MIN_GLOBAL, maximum=core.MAX_GLOBAL, step=0.005, label="Global factor", info="multiplies the whole zone on top of the start/end interpolation; the weak knob")
 
             with gr.Row():
-                start_factor = gr.Slider(value=1.0, minimum=core.MIN_FACTOR, maximum=core.MAX_FACTOR, step=0.001, label="Start factor", info="factor at the beginning of the zone; above 1.0 this is the dangerous one")
-                end_factor = gr.Slider(value=1.0, minimum=core.MIN_FACTOR, maximum=core.MAX_FACTOR, step=0.001, label="End factor", info="factor at the end of the zone; far more forgiving")
+                start_factor = gr.Slider(value=1.0, minimum=core.MIN_FACTOR, maximum=core.MAX_FACTOR, step=0.01, label="Start factor", info="factor at the beginning of the zone; above 1.0 this is the dangerous one")
+                end_factor = gr.Slider(value=1.0, minimum=core.MIN_FACTOR, maximum=core.MAX_FACTOR, step=0.01, label="End factor", info="factor at the end of the zone; far more forgiving")
 
             with gr.Row():
                 zone_start = gr.Slider(value=0.0, minimum=0.0, maximum=1.0, step=0.01, label="Zone start", info="fraction of the schedule; sigmas outside the zone are untouched")
