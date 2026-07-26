@@ -44,6 +44,16 @@ MAX_FACTOR = 1.30
 MIN_GLOBAL = 0.50
 MAX_GLOBAL = 2.00
 
+#   The best setting found in live testing, and therefore the defaults: a gentle deflating
+#   ramp over the back four fifths of the schedule.  Measured on Krea 2 Turbo / Euler a /
+#   8 steps, on both the Beta and Simple schedulers, where it gave a visible composition
+#   change with a clean image and never tripped the guard.  It is a starting point, not a
+#   universal answer — a different architecture has a different schedule (see
+#   `knowledge_sigmas.md` §5.4) and deserves its own calibration run.
+DEFAULT_START_FACTOR = 0.90
+DEFAULT_END_FACTOR = 0.85
+DEFAULT_ZONE_START = 0.2
+
 #   `Skip first N sigmas` covers any realistic step count worth protecting; the head of
 #   the schedule is where all the hazard is, and nobody needs to skip past step 20.
 MAX_SKIP_FIRST = 20

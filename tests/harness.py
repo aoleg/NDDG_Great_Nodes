@@ -676,6 +676,22 @@ returned = sigma_script.ui(False)
 gms_args = [True, 1.0, 1.0, 2.0, 0.0, 1.0, 0, "linear", 2.0, False, True, False, True]
 check(len(returned) == len(gms_args), f"GMS ui() returns {len(returned)}, hooks unpack {len(gms_args)}")
 
+#   the shipped defaults are the best live result, so guard them against drift: they are
+#   the settings a user gets by ticking the accordion and touching nothing
+_, _, ui_start, ui_end, ui_zone_start, ui_zone_end = returned[:6]
+check(ui_start.value == 0.90, f"default Start factor is {ui_start.value}, expected 0.90")
+check(ui_end.value == 0.85, f"default End factor is {ui_end.value}, expected 0.85")
+check(ui_zone_start.value == 0.2, f"default Zone start is {ui_zone_start.value}, expected 0.2")
+check(ui_zone_end.value == 1.0, f"default Zone end is {ui_zone_end.value}, expected 1.0")
+check(returned[0].kwargs.get("value", returned[0].value) in (False, None), "the accordion no longer defaults to off")
+#   ...and those defaults must actually do something once enabled
+check(not sigma_core.is_identity(1.0, ui_start.value, ui_end.value), "the default settings are a no-op")
+#   ...safely, on both live schedules
+for sched, name in ((live, "Beta"), (simple, "Simple")):
+    report = guarded(sched, start_factor=ui_start.value, end_factor=ui_end.value, zone_start=ui_zone_start.value, zone_end=ui_zone_end.value)
+    check(not report.guarded, f"the default settings trip the guard on the live {name} schedule")
+    invariants(report, f"defaults on {name}")
+
 
 class FakeSampler:
     def __init__(self):

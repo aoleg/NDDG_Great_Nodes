@@ -209,12 +209,17 @@ the idea in [ComfyUI-Detail-Daemon](https://github.com/Jonseed/ComfyUI-Detail-Da
 Unlike the Conditioning Modifier above, this **can** and will ruin an image. Read the
 section after the table before moving anything.
 
+**The defaults are calibrated, not neutral.** Start `0.90` / End `0.85` / Zone `0.2 → 1.0`
+is the best result found in live testing — tick the accordion on and it does something
+immediately. See *About the defaults* below for what that means on a model other than the
+one it was measured against.
+
 | Control | Range | Default | What it does |
 | --- | --- | --- | --- |
 | Global factor | 0.50 – 2.00, step 0.005 | `1` | Multiplies the whole zone, on top of the start/end interpolation |
-| Start factor | 0.70 – 1.30, step 0.01 | `1` | The factor at the beginning of the zone. **Above 1.0 this is the dangerous one** |
-| End factor | 0.70 – 1.30, step 0.01 | `1` | The factor at the end of the zone. Far more forgiving |
-| Zone start / Zone end | 0 – 1, step 0.01 | `0` / `1` | Fraction of the schedule to touch; sigmas outside are left exactly as they were |
+| Start factor | 0.70 – 1.30, step 0.01 | `0.90` | The factor at the beginning of the zone. **Above 1.0 this is the dangerous one** |
+| End factor | 0.70 – 1.30, step 0.01 | `0.85` | The factor at the end of the zone. Far more forgiving |
+| Zone start / Zone end | 0 – 1, step 0.01 | `0.2` / `1` | Fraction of the schedule to touch; sigmas outside are left exactly as they were |
 | Skip first N sigmas | 0 – 20, step 1 | `0` | A hard floor on the zone, in **steps** rather than fractions. Never lowers the zone, only raises it |
 | Curve | — | `linear` | How the start factor is interpolated into the end factor |
 | Curve strength | 0.1 – 10 | `2` | `s_curve` only — higher is a sharper transition |
@@ -265,6 +270,23 @@ model's `shift` parameter, which is per-checkpoint: this Turbo distill measures 
 | Global `1.05`, Zone `0.1 → 1.0` | Beta | **black** without the guard |
 | Start `1.15`, End `0.85`, Zone `0.3 → 1.0` | Beta | breaks without the guard; imperfect with it |
 | Start `1.25`, End `0.85`, Zone `0.4 → 1.0` | Beta | breaks mid-generation without the guard; near-inert with it |
+
+### About the defaults
+
+**Start `0.90`, End `0.85`, Zone `0.2 → 1.0` ships as the default** because it was the best
+result across every round of testing: a visible composition change with a clean image, on
+both the Beta and Simple schedulers, never tripping the safety guard.
+
+**It was measured on Krea 2 Turbo, Euler a, 8 steps, CFG 1, and nothing about that is
+universal.** A schedule is dominated by the checkpoint's `shift` — this Turbo distill
+measures `shift ≈ 3.158` where Forge's own `Krea2` entry declares `1.15` — so a different
+architecture, a different distill, or a different step count has a different schedule and a
+different useful range. On an epsilon model (SD 1.5, SDXL) sigma is not even the same *kind*
+of quantity.
+
+Treat the defaults as a starting point that is known to be safe rather than an answer. Tick
+**Debugging** and run one generation on your own model: the log prints the schedule and the
+headroom, which is everything you need to calibrate from.
 
 ### The conclusion, after five rounds and two schedulers
 

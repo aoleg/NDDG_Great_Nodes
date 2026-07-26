@@ -41,16 +41,16 @@ class GreatMultiplySigmas(scripts.Script):
 
     def ui(self, is_img2img):
         with InputAccordion(False, label=self.title()) as enable:
-            gr.HTML('<p style="margin-bottom: 0.5em">Scales the noise schedule the selected <b>Schedule type</b> produced. All three factors at <b>1</b> is a no-op. The useful range is narrow — read the README before widening it.</p>')
+            gr.HTML('<p style="margin-bottom: 0.5em">Scales the noise schedule the selected <b>Schedule type</b> produced. The defaults are the best result found on <b>Krea 2 Turbo</b>; other architectures will differ. All three factors at <b>1</b> is a no-op, and the useful range is narrow — read the README before widening it.</p>')
 
             factor_global = gr.Slider(value=1.0, minimum=core.MIN_GLOBAL, maximum=core.MAX_GLOBAL, step=0.005, label="Global factor", info="multiplies the whole zone on top of the start/end interpolation; the weak knob")
 
             with gr.Row():
-                start_factor = gr.Slider(value=1.0, minimum=core.MIN_FACTOR, maximum=core.MAX_FACTOR, step=0.01, label="Start factor", info="factor at the beginning of the zone; above 1.0 this is the dangerous one")
-                end_factor = gr.Slider(value=1.0, minimum=core.MIN_FACTOR, maximum=core.MAX_FACTOR, step=0.01, label="End factor", info="factor at the end of the zone; far more forgiving")
+                start_factor = gr.Slider(value=core.DEFAULT_START_FACTOR, minimum=core.MIN_FACTOR, maximum=core.MAX_FACTOR, step=0.01, label="Start factor", info="factor at the beginning of the zone; above 1.0 this is the dangerous one")
+                end_factor = gr.Slider(value=core.DEFAULT_END_FACTOR, minimum=core.MIN_FACTOR, maximum=core.MAX_FACTOR, step=0.01, label="End factor", info="factor at the end of the zone; far more forgiving")
 
             with gr.Row():
-                zone_start = gr.Slider(value=0.0, minimum=0.0, maximum=1.0, step=0.01, label="Zone start", info="fraction of the schedule; sigmas outside the zone are untouched")
+                zone_start = gr.Slider(value=core.DEFAULT_ZONE_START, minimum=0.0, maximum=1.0, step=0.01, label="Zone start", info="fraction of the schedule; sigmas outside the zone are untouched")
                 zone_end = gr.Slider(value=1.0, minimum=0.0, maximum=1.0, step=0.01, label="Zone end")
 
             skip_first = gr.Slider(value=0, minimum=0, maximum=core.MAX_SKIP_FIRST, step=1, label="Skip first N sigmas", info="a hard floor on the zone, in steps rather than fractions; at low step counts the fraction cannot express this (Zone 0.1 is index 0 on an 8-step run)")
