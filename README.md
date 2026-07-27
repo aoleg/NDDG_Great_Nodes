@@ -9,6 +9,10 @@ txt2img and img2img accordion list.
 | 🍄 **Great Conditioning Modifier** | Thirteen ways to nudge the prompt conditioning before the model reads it | `semantic_drift` is a safe variability knob; the rest vary |
 | 🍄 **Great Multiply Sigmas** | Zone-limited, curve-interpolated scaling of the noise schedule | Sharp. Deflation is where the good results are |
 
+## Tips
+
+These nodes are fun. For starters, try `svd_filter` at 2..10 strength with Krea-2. It works as a LoRA-free detailer/enhancer.
+
 ## Install
 
 **Extensions → Install from URL:**
@@ -145,6 +149,7 @@ accentuating the separations and making each element more distinct.
 Decomposes your prompt into complexity components and modifies them selectively. Positive
 values amplify mid-level detail, enriching nuance and visual sophistication. Negative
 values simplify by reducing those components, giving more minimalistic, clean images.
+
 > *Untested.*
 
 **🔸 spherical_rotation 🔹** — *conceptual rotation (advanced)*
